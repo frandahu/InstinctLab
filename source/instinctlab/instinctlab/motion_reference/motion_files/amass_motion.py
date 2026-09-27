@@ -5,6 +5,7 @@ import os
 import pickle as pkl
 import yaml
 from collections.abc import Sequence
+from fnmatch import fnmatch
 from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
@@ -525,6 +526,19 @@ class AmassMotion(MotionBuffer):
                     for endings in self.cfg.supported_file_endings:
                         if file.endswith(endings):
                             all_motion_files.append(os.path.join(root, file))
+
+        if self.cfg.file_path_patterns is not None:
+            all_motion_files = [
+                motion_file
+                for motion_file in all_motion_files
+                if any(
+                    fnmatch(
+                        os.path.relpath(motion_file, self.cfg.path).replace(os.sep, "/"),
+                        pattern,
+                    )
+                    for pattern in self.cfg.file_path_patterns
+                )
+            ]
         self._all_motion_files: list[str] = all_motion_files
 
         # hack to override motion file list for debugging

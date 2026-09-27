@@ -31,6 +31,9 @@ docker/artifacts/
 logs
 outputs
 
+# Local datasets and converted motion files
+/data/
+
 # Isaac-Sim packman
 _isaac_sim*
 _repo

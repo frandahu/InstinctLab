@@ -35,6 +35,14 @@ class AmassMotionCfg(MotionBufferCfg):
     `supported_file_endings`
     """
 
+    file_path_patterns: Sequence[str] | None = None
+    """Optional glob patterns used to filter discovered files by their path relative to :attr:`path`.
+
+    Paths are normalized to use ``/`` before matching. For example, the patterns
+    ``["stair_p1/*_retargeted.npz", "stair_p2/*_retargeted.npz"]`` select two subsets from a shared root without
+    copying the motion files into a separate directory.
+    """
+
     skip_frames: int = 0
     """ The number of frames to skip in the motion data. The data frequency loaded will be
     (1 + skip_frames) * motion_data_frequency.
