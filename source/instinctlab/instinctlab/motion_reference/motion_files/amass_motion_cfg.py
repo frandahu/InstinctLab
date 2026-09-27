@@ -43,6 +43,12 @@ class AmassMotionCfg(MotionBufferCfg):
     copying the motion files into a separate directory.
     """
 
+    root_position_offset: tuple[float, float, float] | None = None
+    """Optional XYZ offset applied to retargeted root positions before link poses are computed.
+
+    This is useful for aligning a motion clip with a procedural terrain without modifying the source motion file.
+    """
+
     skip_frames: int = 0
     """ The number of frames to skip in the motion data. The data frequency loaded will be
     (1 + skip_frames) * motion_data_frequency.

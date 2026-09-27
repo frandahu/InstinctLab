@@ -592,6 +592,11 @@ class AmassMotion(MotionBuffer):
         root_trans = torch.as_tensor(raw_data["base_pos_w"], device=self.buffer_device, dtype=torch.float)
         root_quat = torch.as_tensor(raw_data["base_quat_w"], device=self.buffer_device, dtype=torch.float)
 
+        if self.cfg.root_position_offset is not None:
+            if len(self.cfg.root_position_offset) != 3:
+                raise ValueError("root_position_offset must contain exactly three XYZ values.")
+            root_trans = root_trans + root_trans.new_tensor(self.cfg.root_position_offset)
+
         # qpos_isaac = qpos[retargetted_joints_to_output_joints_ids]
         retargetted_joints_to_output_joints_ids = [joint_names.index(j_name) for j_name in self.isaac_joint_names]
         joint_pos = joint_pos[:, retargetted_joints_to_output_joints_ids]

@@ -36,3 +36,14 @@ gym.register(
         "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_ppo_cfg:G1ShadowingPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="Instinct-Shadowing-WholeBody-GRAIL-Stairs-Bootstrap-G1-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.grail_stair_bootstrap_cfg:G1GrailStairBootstrapEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1ShadowingPPORunnerCfg",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_ppo_cfg:G1ShadowingPPORunnerCfg",
+    },
+)
