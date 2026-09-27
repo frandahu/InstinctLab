@@ -79,7 +79,7 @@ _hacked_selected_files_ = [
 ]
 
 
-MOTION_NAME = "LafanFiltered"
+MOTION_NAME = "GrailCurbTest"
 _path_ = os.path.expanduser("~/Datasets/UbisoftLAFAN1_GMR_g1_29dof_torsoBase_retargetted_instinctnpz")
 _hacked_selected_files_ = [
     "aiming1_subject1_retargetted.npz",  # O
@@ -183,7 +183,8 @@ class AmassMotionCfg(AmassMotionCfgBase):
     # path = os.path.expanduser("~/Datasets/UbisoftLAFAN1_GMR_g1_29dof_torsoBase_retargetted_instinctnpz")
     # path = os.path.expanduser("~/Datasets/AMASS_SMPLX-NG_GMR_29dof_g1_torsoBase_retargetted_20250901_instinctnpz")
     # path = _path_
-    path = os.path.expanduser("~/Datasets/NoKov-Marslab-Motions-instinctnpz/20251016_diveroll4_single")
+    #path = os.path.expanduser("~/Datasets/NoKov-Marslab-Motions-instinctnpz/20251016_diveroll4_single")
+    path = "/workspace/instinctlab/data/grail_instinctlab/curb"
     retargetting_func = None
     filtered_motion_selection_filepath = None
     motion_start_from_middle_range = [0.0, 0.8]
@@ -501,4 +502,4 @@ class G1PlaneShadowingEnvCfg_PLAY(G1PlaneShadowingEnvCfg):
         #         robot_cfg=SceneEntityCfg("robot"),
         #         motion_reference_cfg=SceneEntityCfg("motion_reference"),
         #     ),
-        # )
+        #)

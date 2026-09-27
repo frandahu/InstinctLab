@@ -126,7 +126,7 @@ def main():
     )
     parser.add_argument("--src_frame", type=str, default="pelvis")
     parser.add_argument("--tgt_frame", type=str, default="torso_link")
-    parser.add_argument("--num_cpus", default=10)
+    parser.add_argument("--num_cpus", type=int, default=10)
 
     args = parser.parse_args()
 
