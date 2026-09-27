@@ -121,3 +121,33 @@ class G1GrailStairBootstrapEnvCfg(G1PlaneShadowingEnvCfg):
         self.terminations.link_pos_too_far.params["distance_threshold"] = 0.5
 
         self.run_name = "G1Shadowing_GrailStairBootstrap_AlignedSingleMotion"
+
+
+# Stage two begins two seconds into the ten-second clip, shortly before the first stair contact. The observation and
+# action spaces remain identical to the frame-zero task, so its checkpoint can be reused.
+GRAIL_MIDSTAIR_MOTION_CFG = GRAIL_BOOTSTRAP_MOTION_CFG.replace(
+    motion_start_from_middle_range=(0.20, 0.20),
+)
+
+GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG = motion_reference_cfg.replace(
+    motion_buffers={"GrailStairMidStairBootstrap": GRAIL_MIDSTAIR_MOTION_CFG},
+)
+
+
+@configclass
+class G1GrailStairMidStairBootstrapEnvCfg(G1GrailStairBootstrapEnvCfg):
+    """Second bootstrap stage focused on stair contact and ascent."""
+
+    scene: shadowing_cfg.ShadowingSceneCfg = G1GrailStairBootstrapEnvCfg.scene.replace(
+        motion_reference=GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG,
+    )
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # The frame-zero policy plateaued because strict tracking resets occurred before it experienced enough of the
+        # staircase. Keep projected-gravity fall detection unchanged, but allow larger transient tracking errors.
+        self.terminations.base_pos_too_far.params["distance_threshold"] = 0.75
+        self.terminations.link_pos_too_far.params["distance_threshold"] = 0.75
+
+        self.run_name = "G1Shadowing_GrailStairBootstrap_MidStair20pct"
