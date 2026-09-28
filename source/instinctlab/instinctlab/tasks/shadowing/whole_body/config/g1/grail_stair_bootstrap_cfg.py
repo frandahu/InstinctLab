@@ -195,6 +195,10 @@ class G1GrailStairMidStairBootstrapEnvCfg(G1GrailStairBootstrapEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
+        # Keep the prior position-weight experiment local to this task, and test stronger orientation tracking.
+        self.rewards.rewards.base_position_imitation_gauss.weight = 1.0
+        self.rewards.rewards.base_rot_imitation_gauss.weight = 1.0
+
         # The frame-zero policy plateaued because strict tracking resets occurred before it experienced enough of the
         # staircase. Keep projected-gravity fall detection unchanged, but allow larger transient tracking errors.
         self.terminations.base_pos_too_far.params["distance_threshold"] = 0.75
