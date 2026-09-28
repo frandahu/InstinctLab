@@ -65,40 +65,43 @@ GRAIL_BOOTSTRAP_TERRAIN_CFG = TerrainGeneratorCfg(
 )
 
 
-GRAIL_BOOTSTRAP_SCENE_CFG = shadowing_cfg.ShadowingSceneCfg(
-    num_envs=32,
-    env_spacing=4.0,
-    robot=G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot"),
-    motion_reference=GRAIL_BOOTSTRAP_MOTION_REFERENCE_CFG,
-    terrain=TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="generator",
-        terrain_generator=GRAIL_BOOTSTRAP_TERRAIN_CFG,
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-        ),
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path=(
-                f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/"
-                "TilesMarbleSpiderWhiteBrickBondHoned.mdl"
+def _make_bootstrap_scene_cfg(motion_reference_cfg) -> shadowing_cfg.ShadowingSceneCfg:
+    # ShadowingSceneCfg removes robot_reference in __post_init__ when debug visualization is disabled, so an
+    # initialized scene cannot be cloned with dataclasses.replace. Construct each stage's scene independently.
+    return shadowing_cfg.ShadowingSceneCfg(
+        num_envs=32,
+        env_spacing=4.0,
+        robot=G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot"),
+        motion_reference=motion_reference_cfg,
+        terrain=TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=GRAIL_BOOTSTRAP_TERRAIN_CFG,
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
             ),
-            project_uvw=True,
-            texture_scale=(0.25, 0.25),
+            visual_material=sim_utils.MdlFileCfg(
+                mdl_path=(
+                    f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/"
+                    "TilesMarbleSpiderWhiteBrickBondHoned.mdl"
+                ),
+                project_uvw=True,
+                texture_scale=(0.25, 0.25),
+            ),
+            debug_vis=False,
         ),
-        debug_vis=False,
-    ),
-)
+    )
 
 
 @configclass
 class G1GrailStairBootstrapEnvCfg(G1PlaneShadowingEnvCfg):
     """Deterministic learnability test before scaling to the full GRAIL stair set."""
 
-    scene: shadowing_cfg.ShadowingSceneCfg = GRAIL_BOOTSTRAP_SCENE_CFG
+    scene: shadowing_cfg.ShadowingSceneCfg = _make_bootstrap_scene_cfg(GRAIL_BOOTSTRAP_MOTION_REFERENCE_CFG)
 
     def __post_init__(self):
         super().__post_init__()
@@ -141,9 +144,7 @@ GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG = motion_reference_cfg.replace(
 class G1GrailStairMidStairBootstrapEnvCfg(G1GrailStairBootstrapEnvCfg):
     """Second bootstrap stage focused on stair contact and ascent."""
 
-    scene: shadowing_cfg.ShadowingSceneCfg = GRAIL_BOOTSTRAP_SCENE_CFG.replace(
-        motion_reference=GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG,
-    )
+    scene: shadowing_cfg.ShadowingSceneCfg = _make_bootstrap_scene_cfg(GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG)
 
     def __post_init__(self):
         super().__post_init__()
