@@ -175,10 +175,6 @@ class GrailStairFailureTimeMonitor(MonitorTerm):
         for reason in ("base_pg_too_far", "link_pos_too_far", "dataset_exhausted"):
             triggered = self._env.termination_manager.get_term(reason)[env_ids][completed].bool()
             self._last_log[f"{reason}_fraction"] = triggered.float().mean().item()
-            if triggered.any():
-                self._last_log[f"{reason}_reference_end_s_p50"] = torch.quantile(
-                    reference_time_s[triggered].float(), 0.50
-                ).item()
 
     def get_log(self, is_episode=False) -> dict[str, float]:
         return self._last_log if is_episode else {}
