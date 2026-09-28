@@ -231,6 +231,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         num_learning_iterations=agent_cfg.max_iterations,
         init_at_random_ep_len=getattr(agent_cfg, "init_at_random_ep_len", False),
     )
+    runner.save(os.path.join(log_dir, f"model_{runner.current_learning_iteration}.pt"))
 
     if args_cli.cprofile:
         cprofile.disable()
