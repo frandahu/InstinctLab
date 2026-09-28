@@ -195,8 +195,10 @@ class G1GrailStairMidStairBootstrapEnvCfg(G1GrailStairBootstrapEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # Keep the prior position-weight experiment local to this task.
+        # Keep the position-reward experiment local to this task. A wider kernel retains a learning signal when the
+        # base drifts several decimeters from the reference; evaluate this separately from reward-weight changes.
         self.rewards.rewards.base_position_imitation_gauss.weight = 1.0
+        self.rewards.rewards.base_position_imitation_gauss.params["std"] = 0.5
 
         # The frame-zero policy plateaued because strict tracking resets occurred before it experienced enough of the
         # staircase. Keep projected-gravity fall detection unchanged, but allow larger transient tracking errors.
