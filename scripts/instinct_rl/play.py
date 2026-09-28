@@ -3,6 +3,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import csv
 import subprocess
 import sys
 
@@ -29,6 +30,13 @@ parser.add_argument("--env_cfg", action="store_true", default=False, help="Load 
 parser.add_argument("--agent_cfg", action="store_true", default=False, help="Load configuration from file.")
 parser.add_argument("--sample", action="store_true", default=False, help="Sample actions instead of using the policy.")
 parser.add_argument("--zero_act_until", type=int, default=0, help="Zero actions until this timestep.")
+parser.add_argument("--max_steps", type=int, default=None, help="Stop headless playback after this many steps.")
+parser.add_argument(
+    "--grail_diagnostic_csv",
+    type=str,
+    default=None,
+    help="Write per-step GRAIL stair posture and foot-contact diagnostics to a new CSV file.",
+)
 parser.add_argument(
     "--no_terminate", action="store_true", default=False, help="Do not remove termination conditions in simulation."
 )
@@ -43,6 +51,10 @@ cli_args.add_instinct_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.max_steps is not None and args_cli.max_steps <= 0:
+    parser.error("--max_steps must be positive")
+if args_cli.grail_diagnostic_csv is not None and args_cli.max_steps is None:
+    parser.error("--grail_diagnostic_csv requires --max_steps")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -84,6 +96,77 @@ if args_cli.debug:
     debugpy.listen(ip_address)
     debugpy.wait_for_client()
     debugpy.breakpoint()
+
+
+GRAIL_DIAGNOSTIC_COLUMNS = [
+    "env_id",
+    "episode_step",
+    "reference_time_s",
+    "projected_gravity_error",
+    "base_x",
+    "base_y",
+    "base_z",
+    "reference_base_x",
+    "reference_base_y",
+    "reference_base_z",
+    "left_ankle_x",
+    "left_ankle_y",
+    "left_ankle_z",
+    "right_ankle_x",
+    "right_ankle_y",
+    "right_ankle_z",
+    "left_contact_force_n",
+    "right_contact_force_n",
+    "env_origin_x",
+    "env_origin_y",
+    "env_origin_z",
+    "done_after_action",
+    "base_pg_too_far_after_action",
+    "link_pos_too_far_after_action",
+    "dataset_exhausted_after_action",
+]
+
+
+def _grail_diagnostic_snapshot(env, robot_foot_ids: list[int], contact_foot_ids: list[int]) -> list[list[float]]:
+    """Capture state before the action so automatic episode resets cannot erase the failure approach."""
+    scene = env.unwrapped.scene
+    robot = scene["robot"]
+    reference = scene["motion_reference"]
+    contact_sensor = scene["contact_forces"]
+    env_ids = reference.ALL_INDICES
+
+    reference_time_s = (
+        reference.complete_motion_lengths - reference.assigned_motion_lengths
+        + env.unwrapped.episode_length_buf * env.unwrapped.step_dt
+    )
+    reference_base = reference.data.base_pos_w[env_ids, reference.aiming_frame_idx]
+    reference_quat = reference.data.base_quat_w[env_ids, reference.aiming_frame_idx]
+    robot_pg = math_utils.quat_apply_inverse(robot.data.root_state_w[:, 3:7], robot.data.GRAVITY_VEC_W)
+    reference_pg = math_utils.quat_apply_inverse(reference_quat, robot.data.GRAVITY_VEC_W)
+    pg_error = torch.linalg.vector_norm(robot_pg - reference_pg, dim=-1)
+    ankle_positions = robot.data.body_pos_w[:, robot_foot_ids].reshape(env.unwrapped.num_envs, 6)
+    contact_forces = (
+        contact_sensor.data.net_forces_w_history[:, :, contact_foot_ids]
+        .norm(dim=-1)
+        .max(dim=1)
+        .values
+    )
+
+    values = torch.cat(
+        (
+            env_ids.float().unsqueeze(-1),
+            env.unwrapped.episode_length_buf.float().unsqueeze(-1),
+            reference_time_s.unsqueeze(-1),
+            pg_error.unsqueeze(-1),
+            robot.data.root_pos_w,
+            reference_base,
+            ankle_positions,
+            contact_forces,
+            reference.env_origins,
+        ),
+        dim=-1,
+    )
+    return values.cpu().tolist()
 
 
 def main():
@@ -178,37 +261,77 @@ def main():
             obs, _ = env.get_observations()
             ppo_runner.export_as_onnx(obs, export_model_dir)
 
+    diagnostic_file = None
+    if args_cli.grail_diagnostic_csv is not None:
+        if args_cli.no_terminate:
+            raise ValueError("GRAIL diagnostics require the normal termination conditions.")
+        robot_foot_ids, _ = env.unwrapped.scene["robot"].find_bodies(
+            ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
+        )
+        contact_foot_ids, _ = env.unwrapped.scene["contact_forces"].find_bodies(
+            ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
+        )
+        if len(robot_foot_ids) != 2 or len(contact_foot_ids) != 2:
+            raise RuntimeError("Both ankle links must be present in the robot and contact sensor.")
+        diagnostic_file = open(args_cli.grail_diagnostic_csv, "x", newline="")
+        diagnostic_writer = csv.writer(diagnostic_file)
+        diagnostic_writer.writerow(GRAIL_DIAGNOSTIC_COLUMNS)
+
     # reset environment
     obs, _ = env.get_observations()
     timestep = 0
     # simulate environment
-    while simulation_app.is_running():
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            if timestep < args_cli.zero_act_until:
-                actions[:] = 0.0
-            # env stepping
-            obs, rewards, dones, infos = env.step(actions)
-        timestep += 1
+    try:
+        while simulation_app.is_running():
+            # run everything in inference mode
+            with torch.inference_mode():
+                diagnostic_rows = (
+                    _grail_diagnostic_snapshot(env, robot_foot_ids, contact_foot_ids)
+                    if diagnostic_file is not None
+                    else None
+                )
+                # agent stepping
+                actions = policy(obs)
+                if timestep < args_cli.zero_act_until:
+                    actions[:] = 0.0
+                # env stepping
+                obs, rewards, dones, infos = env.step(actions)
+                if diagnostic_rows is not None:
+                    done_flags = dones.bool().cpu().tolist()
+                    reason_flags = {
+                        name: env.unwrapped.termination_manager.get_term(name).bool().cpu().tolist()
+                        for name in ("base_pg_too_far", "link_pos_too_far", "dataset_exhausted")
+                    }
+                    for env_id, row in enumerate(diagnostic_rows):
+                        done = done_flags[env_id]
+                        diagnostic_writer.writerow(
+                            row
+                            + [
+                                int(done),
+                                int(done and reason_flags["base_pg_too_far"][env_id]),
+                                int(done and reason_flags["link_pos_too_far"][env_id]),
+                                int(done and reason_flags["dataset_exhausted"][env_id]),
+                            ]
+                        )
+            timestep += 1
 
-        # override reward terms if auxiliary reward is enabled
-        if args_cli.aux_reward:
-            # NOTE: This is only applicable when reward_term has `.reward` to be overridden
-            aux_rewards = ppo_runner.alg.compute_auxiliary_reward(infos["observations"])
-            for aux_reward_name, aux_reward in aux_rewards.items():
-                aux_term_cfg = env.unwrapped.reward_manager.get_term_cfg(aux_reward_name)  # type: ignore
-                aux_term_cfg.func.reward[:] = aux_reward * getattr(ppo_runner.alg, aux_reward_name + "_coef", 1.0)
+            # override reward terms if auxiliary reward is enabled
+            if args_cli.aux_reward:
+                # NOTE: This is only applicable when reward term has `.reward` to be overridden
+                aux_rewards = ppo_runner.alg.compute_auxiliary_reward(infos["observations"])
+                for aux_reward_name, aux_reward in aux_rewards.items():
+                    aux_term_cfg = env.unwrapped.reward_manager.get_term_cfg(aux_reward_name)  # type: ignore
+                    aux_term_cfg.func.reward[:] = aux_reward * getattr(ppo_runner.alg, aux_reward_name + "_coef", 1.0)
 
-        # exit the loop if video_length is meet
-        if args_cli.video:
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+            if args_cli.max_steps is not None and timestep >= args_cli.max_steps:
                 break
-
-    # close the simulator
-    env.close()
+            if args_cli.video and timestep >= args_cli.video_length:
+                break
+    finally:
+        if diagnostic_file is not None:
+            diagnostic_file.close()
+            print(f"[INFO] GRAIL diagnostic CSV: {args_cli.grail_diagnostic_csv}")
+        env.close()
 
     if args_cli.video:
         subprocess.run(
