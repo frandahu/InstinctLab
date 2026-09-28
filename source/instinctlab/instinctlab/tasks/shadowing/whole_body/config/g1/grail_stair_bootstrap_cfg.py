@@ -1,5 +1,7 @@
 """Single-motion GRAIL stair bootstrap task with deterministic terrain alignment."""
 
+import torch
+
 import isaaclab.sim as sim_utils
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -9,6 +11,7 @@ import instinctlab.tasks.shadowing.whole_body.shadowing_env_cfg as shadowing_cfg
 import instinctlab.terrains as terrain_gen
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
+from instinctlab.monitors import MonitorTerm, MonitorTermCfg
 
 from .grail_stair_shadowing_cfg import GRAIL_MOTION_ROOT
 from .plane_shadowing_cfg import G1_CFG, G1PlaneShadowingEnvCfg, motion_reference_cfg
@@ -140,11 +143,58 @@ GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG = motion_reference_cfg.replace(
 )
 
 
+class GrailStairFailureTimeMonitor(MonitorTerm):
+    """Log where mid-stair episodes end on the original motion timeline."""
+
+    def __init__(self, cfg: MonitorTermCfg, env):
+        super().__init__(cfg, env)
+        self._last_log: dict[str, float] = {}
+
+    def reset_idx(self, env_ids):
+        # InstinctRlEnv invokes monitors before the scene and episode counters are reset.
+        episode_steps = self._env.episode_length_buf[env_ids]
+        completed = episode_steps > 0
+        if not completed.any():
+            self._last_log = {}
+            return
+
+        motion_reference = self._env.scene["motion_reference"]
+        start_s = (
+            motion_reference.complete_motion_lengths[env_ids]
+            - motion_reference.assigned_motion_lengths[env_ids]
+        )[completed]
+        reference_time_s = start_s + episode_steps[completed] * self._env.step_dt
+
+        self._last_log = {
+            "episode_count": float(reference_time_s.numel()),
+            "reference_start_s_mean": start_s.float().mean().item(),
+            "reference_end_s_p10": torch.quantile(reference_time_s.float(), 0.10).item(),
+            "reference_end_s_p50": torch.quantile(reference_time_s.float(), 0.50).item(),
+            "reference_end_s_p90": torch.quantile(reference_time_s.float(), 0.90).item(),
+        }
+        for reason in ("base_pg_too_far", "link_pos_too_far", "dataset_exhausted"):
+            triggered = self._env.termination_manager.get_term(reason)[env_ids][completed].bool()
+            self._last_log[f"{reason}_fraction"] = triggered.float().mean().item()
+            if triggered.any():
+                self._last_log[f"{reason}_reference_end_s_p50"] = torch.quantile(
+                    reference_time_s[triggered].float(), 0.50
+                ).item()
+
+    def get_log(self, is_episode=False) -> dict[str, float]:
+        return self._last_log if is_episode else {}
+
+
+@configclass
+class GrailStairMidStairMonitorCfg(shadowing_cfg.MonitorCfg):
+    failure_time: MonitorTermCfg = MonitorTermCfg(func=GrailStairFailureTimeMonitor)
+
+
 @configclass
 class G1GrailStairMidStairBootstrapEnvCfg(G1GrailStairBootstrapEnvCfg):
     """Second bootstrap stage focused on stair contact and ascent."""
 
     scene: shadowing_cfg.ShadowingSceneCfg = _make_bootstrap_scene_cfg(GRAIL_MIDSTAIR_MOTION_REFERENCE_CFG)
+    monitors: GrailStairMidStairMonitorCfg = GrailStairMidStairMonitorCfg()
 
     def __post_init__(self):
         super().__post_init__()
