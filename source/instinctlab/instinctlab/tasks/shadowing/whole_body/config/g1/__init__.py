@@ -38,7 +38,7 @@ gym.register(
 )
 
 gym.register(
-    id="Instinct-Shadowing-WholeBody-GRAIL-Stairs-Bootstrap-G1-v0",
+    id="Instinct-Shadowing-WholeBody-GRAIL-Stairs-AlignedFullClip-G1-v0",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
     kwargs={
@@ -49,13 +49,11 @@ gym.register(
 )
 
 gym.register(
-    id="Instinct-Shadowing-WholeBody-GRAIL-Stairs-Bootstrap-MidStair-G1-v0",
+    id="Instinct-Shadowing-WholeBody-GRAIL-Stairs-AlignedFullClip-Play-G1-v0",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": (
-            f"{task_entry}.grail_stair_bootstrap_cfg:G1GrailStairMidStairBootstrapEnvCfg"
-        ),
+        "env_cfg_entry_point": f"{task_entry}.grail_stair_bootstrap_cfg:G1GrailStairBootstrapEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1ShadowingPPORunnerCfg",
         "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_ppo_cfg:G1ShadowingPPORunnerCfg",
     },
