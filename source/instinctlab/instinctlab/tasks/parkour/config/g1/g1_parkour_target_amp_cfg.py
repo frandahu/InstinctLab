@@ -31,9 +31,10 @@ G1_with_shoe_CFG.spawn.asset_path = os.path.abspath(
 
 @configclass
 class AmassMotionCfg(AmassMotionCfgBase):
-    path = os.path.expanduser("~/Datasets")
+    path = os.environ.get("INSTINCTLAB_GRAIL_MOTION_ROOT", "/workspace/instinctlab/data/grail_instinctlab")
+    file_path_patterns = ["stair_p1/*_retargeted.npz", "stair_p2/*_retargeted.npz"]
     retargetting_func = None
-    filtered_motion_selection_filepath = os.path.expanduser("~/Datasets/parkour_motion_without_run.yaml")
+    filtered_motion_selection_filepath = None
     motion_start_from_middle_range = [0.0, 0.9]
     motion_start_height_offset = 0.0
     ensure_link_below_zero_ground = False
