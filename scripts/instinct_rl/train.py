@@ -12,6 +12,10 @@ import multiprocessing as mp
 import os
 import sys
 
+from cudnn_bootstrap import preload_torch_cudnn
+
+preload_torch_cudnn()
+
 from isaaclab.app import AppLauncher
 
 # local imports
