@@ -76,7 +76,8 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
-    save_interval = 5000
+    save_interval = 1000
+    log_interval = 50
     experiment_name = "g1_parkour"
     resume = False
     load_run = ""
