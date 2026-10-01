@@ -16,12 +16,15 @@ def make_cases(
     depth_range: tuple[float, float],
     width: float,
     irregular: bool,
+    irregular_fraction: float = 0.20,
+    dimension_variation: float = 0.25,
+    landing_depth: float = 1.20,
 ) -> list[dict]:
     """Each lane has its own seed; adding lanes preserves existing cases."""
     if num_envs < 1 or num_steps < 1:
         raise ValueError("num_envs and num_steps must be positive")
-    if mode not in ("mixed", "up", "down"):
-        raise ValueError("stair_mode must be mixed, up, or down")
+    if mode not in ("up_down", "mixed", "up", "down"):
+        raise ValueError("stair_mode must be up_down, mixed, up, or down")
     if mode == "mixed" and num_envs < 2:
         raise ValueError("mixed mode requires at least two environments")
     for name, bounds in (("step_height_range", height_range), ("tread_depth_range", depth_range)):
@@ -29,36 +32,108 @@ def make_cases(
             raise ValueError(f"{name} requires finite 0 < minimum <= maximum")
     if not math.isfinite(width) or width < 0.8:
         raise ValueError("stair_width must be finite and at least 0.8 m")
+    if not math.isfinite(landing_depth) or landing_depth < 0.8:
+        raise ValueError("landing_depth must be finite and at least 0.8 m")
+    if not math.isfinite(irregular_fraction) or not 0 < irregular_fraction < 0.5:
+        raise ValueError("irregular_fraction must be finite and in (0, 0.5)")
+    if not math.isfinite(dimension_variation) or not 0 < dimension_variation < 1:
+        raise ValueError("dimension_variation must be finite and in (0, 1)")
+    if irregular and num_steps < 3:
+        raise ValueError("Sparse irregular stairs require at least three steps per flight")
+    if irregular and height_range[0] == height_range[1] and depth_range[0] == depth_range[1]:
+        raise ValueError("Irregular stairs require a nonzero height or depth range; use --regular otherwise")
+    anomaly_count = min(math.ceil(num_steps * irregular_fraction), (num_steps - 1) // 2) if irregular else 0
+
+    def vary(rng, baseline, bounds):
+        # Keep dimensions within the requested bounds; never alter a fixed dimension.
+        signs = [sign for sign, room in ((-1, baseline - bounds[0]), (1, bounds[1] - baseline)) if room > 0]
+        sign = rng.choice(signs)
+        room = baseline - bounds[0] if sign < 0 else bounds[1] - baseline
+        delta = min(baseline * rng.uniform(dimension_variation / 2, dimension_variation), room)
+        return baseline + sign * delta
+
+    def flight(rng, direction, nominal_height, nominal_depth, carried_heights=None):
+        heights, depths = [nominal_height] * num_steps, [nominal_depth] * num_steps
+        indices = rng.sample(range(num_steps), anomaly_count)
+        height_can_vary = height_range[0] < height_range[1]
+        depth_can_vary = depth_range[0] < depth_range[1]
+        if carried_heights is not None:
+            # Reposition the ascent's height deviations on descent. Equal total rise
+            # and fall brings the final platform back to ground level exactly.
+            values = [height for height in carried_heights if height != nominal_height]
+            rng.shuffle(values)
+            for index, height in zip(indices, values):
+                heights[index] = height
+        for index in indices:
+            if carried_heights is None:
+                choices = (["height"] if height_can_vary else []) + (["depth"] if depth_can_vary else [])
+                if height_can_vary and depth_can_vary:
+                    choices.append("both")
+                changed = rng.choice(choices)
+                if changed in ("height", "both"):
+                    heights[index] = vary(rng, nominal_height, height_range)
+                if changed in ("depth", "both"):
+                    depths[index] = vary(rng, nominal_depth, depth_range)
+            elif heights[index] == nominal_height or (depth_can_vary and rng.choice((False, True))):
+                depths[index] = vary(rng, nominal_depth, depth_range)
+        return {
+            "direction": direction,
+            "riser_heights_m": heights,
+            "tread_depths_m": depths,
+            "anomalous_step_indices": sorted(indices),  # zero-based, within this flight
+        }
+
     cases = []
     for env_id in range(num_envs):
         case_seed = seed + 1009 * env_id
         rng = random.Random(case_seed)
         direction = ("up" if env_id % 2 == 0 else "down") if mode == "mixed" else mode
-        heights = [rng.uniform(*height_range) for _ in range(num_steps if irregular else 1)]
-        depths = [rng.uniform(*depth_range) for _ in range(num_steps if irregular else 1)]
-        if not irregular:
-            heights *= num_steps
-            depths *= num_steps
-        start_height = 0.0 if direction == "up" else sum(heights)
+        nominal_height, nominal_depth = rng.uniform(*height_range), rng.uniform(*depth_range)
+        first = flight(rng, "up" if direction == "up_down" else direction, nominal_height, nominal_depth)
+        flights = [first]
+        heights, depths = first["riser_heights_m"], first["tread_depths_m"]
+        start_height = sum(heights) if direction == "down" else 0.0
+        deltas = [height if direction != "down" else -height for height in heights]
+        stair_start = 1.2
+        summit_start = summit_end = summit_height = 0.0
+        if direction == "up_down":
+            second = flight(rng, "down", nominal_height, nominal_depth, carried_heights=heights)
+            flights.append(second)
+            summit_height = sum(heights)
+            summit_start = stair_start + sum(depths)
+            summit_end = summit_start + landing_depth
+            deltas = heights + [0.0] + [-height for height in second["riser_heights_m"]]
+            heights = heights + [0.0] + second["riser_heights_m"]
+            depths = depths + [landing_depth] + second["tread_depths_m"]
         surface_heights = []
         level = start_height
-        for height in heights:
-            level += height if direction == "up" else -height
+        for delta in deltas:
+            level += delta
             surface_heights.append(max(0.0, level))
+        if direction in ("down", "up_down"):
+            surface_heights[-1] = 0.0  # avoid floating-point residue on the final ground platform
         # Start at x=0; the first riser is 1.2 m ahead. All distances are lane-local.
-        stair_start = 1.2
         stair_end = stair_start + sum(depths)
         cases.append({
             "env_id": env_id,
             "case_seed": case_seed,
             "direction": direction,
             "irregular": irregular,
+            "nominal_riser_height_m": nominal_height,
+            "nominal_tread_depth_m": nominal_depth,
+            "anomalous_steps_per_flight": anomaly_count,
+            "flights": flights,
             "riser_heights_m": heights,
+            "riser_deltas_m": deltas,
             "tread_depths_m": depths,
             "surface_heights_m": surface_heights,
             "width_m": width,
             "start_height_m": start_height,
             "end_height_m": surface_heights[-1],
+            "requires_summit": direction == "up_down",
+            "summit_start_x_m": summit_start,
+            "summit_end_x_m": summit_end,
+            "summit_height_m": summit_height,
             "lane_min_x_m": -1.2,
             "stair_start_x_m": stair_start,
             "stair_end_x_m": stair_end,
@@ -105,4 +180,5 @@ def summarize(episodes: list[dict], expected: int) -> dict:
         "mean_success_time_s": (
             sum(row["elapsed_s"] for row in successful) / len(successful) if successful else None
         ),
+        "summit_reached_episodes": sum(bool(row.get("summit_reached", False)) for row in episodes),
     }

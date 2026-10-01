@@ -77,8 +77,14 @@ def _case_tensors(env):
         env._stair_eval_cases = cases
         env._stair_eval_bounds = {
             key: torch.tensor([case[key] for case in cases], dtype=torch.float32, device=env.device)
-            for key in ("width_m", "lane_min_x_m", "lane_max_x_m", "stair_end_x_m", "goal_x_m", "end_height_m")
+            for key in (
+                "width_m", "lane_min_x_m", "lane_max_x_m", "stair_end_x_m", "goal_x_m", "end_height_m",
+                "summit_start_x_m", "summit_end_x_m", "summit_height_m",
+            )
         }
+        env._stair_requires_summit = torch.tensor(
+            [case["requires_summit"] for case in cases], dtype=torch.bool, device=env.device
+        )
         edges = [[case["stair_start_x_m"]] for case in cases]
         levels = [[case["start_height_m"], *case["surface_heights_m"]] for case in cases]
         for row, case in zip(edges, cases):
@@ -154,6 +160,7 @@ class StairSuccess(ManagerTermBase):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self.hold_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        self.summit_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self.snapshot = None
         self.foot_ids, _ = env.scene["robot"].find_bodies(
             ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
@@ -165,7 +172,9 @@ class StairSuccess(ManagerTermBase):
             raise RuntimeError("Stair evaluation requires both ankle links and their contact sensors")
 
     def reset(self, env_ids=None):
-        self.hold_steps[slice(None) if env_ids is None else env_ids] = 0
+        ids = slice(None) if env_ids is None else env_ids
+        self.hold_steps[ids] = 0
+        self.summit_reached[ids] = False
         # Keep snapshot intact: the caller reads it after env.step has auto-reset.
 
     def __call__(self, env, hold_s=0.5, goal_radius=0.35):
@@ -179,6 +188,17 @@ class StairSuccess(ManagerTermBase):
         floor = ground_height(env, pos[:, 0])
         clearance = pos[:, 2] - floor
         gravity_z = robot.data.projected_gravity_b[:, 2]
+        supported_upright = (
+            (forces.max(dim=-1).values > 5.0) & (gravity_z < -math.cos(0.5)) & (clearance > 0.5)
+        )
+        on_summit = (
+            (feet[:, :, 0] > bounds["summit_start_x_m"][:, None] + 0.05)
+            & (feet[:, :, 0] < bounds["summit_end_x_m"][:, None] - 0.05)
+            & (feet[:, :, 1].abs() < bounds["width_m"][:, None] / 2 - 0.1)
+            & ((feet[:, :, 2] - bounds["summit_height_m"][:, None]).abs() < 0.20)
+        ).all(dim=-1)
+        on_summit &= (pos[:, 0] > bounds["summit_start_x_m"]) & (pos[:, 0] < bounds["summit_end_x_m"])
+        self.summit_reached |= env._stair_requires_summit & on_summit & supported_upright
         distance = torch.sqrt((pos[:, 0] - bounds["goal_x_m"]) ** 2 + pos[:, 1] ** 2)
         on_landing = (feet[:, :, 0] > bounds["stair_end_x_m"][:, None] + 0.1).all(dim=-1)
         on_landing &= (feet[:, :, 1].abs() < bounds["width_m"][:, None] / 2 - 0.1).all(dim=-1)
@@ -189,9 +209,8 @@ class StairSuccess(ManagerTermBase):
             (distance < goal_radius)
             & on_landing
             & feet_near_floor
-            & (forces.max(dim=-1).values > 5.0)
-            & (gravity_z < -math.cos(0.5))
-            & (clearance > 0.5)
+            & supported_upright
+            & (~env._stair_requires_summit | self.summit_reached)
         )
         self.hold_steps[:] = torch.where(eligible, self.hold_steps + 1, 0)
         self.snapshot = {
@@ -207,6 +226,7 @@ class StairSuccess(ManagerTermBase):
             "command": env.command_manager.get_command("base_velocity").clone(),
             "goal_distance": distance,
             "spawn_offsets": env._stair_spawn_offsets.clone(),
+            "summit_reached": self.summit_reached.clone(),
         }
         return self.hold_steps >= math.ceil(hold_s / env.step_dt)
 

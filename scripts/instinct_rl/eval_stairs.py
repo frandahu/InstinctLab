@@ -26,14 +26,20 @@ def build_parser():
     parser.add_argument("--num_envs", type=int, default=8)
     parser.add_argument("--episodes_per_env", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stair_mode", choices=("mixed", "up", "down"), default="mixed")
-    parser.add_argument("--num_steps", type=int, default=8)
+    parser.add_argument("--stair_mode", choices=("up_down", "mixed", "up", "down"), default="up_down")
+    parser.add_argument("--num_steps", type=int, default=8, help="Steps per flight (up_down has this many up AND down)")
     parser.add_argument("--step_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
     parser.add_argument("--tread_depth_range", type=float, nargs=2, default=(0.25, 0.40), metavar=("MIN", "MAX"))
     parser.add_argument("--stair_width", type=float, default=2.0)
-    parser.add_argument("--irregular", action="store_true", help="Vary each riser/tread independently within a flight")
+    geometry = parser.add_mutually_exclusive_group()
+    geometry.add_argument("--irregular", action="store_true", dest="irregular", help="Sparse dimensional deviations (default)")
+    geometry.add_argument("--regular", action="store_false", dest="irregular", help="All steps in a flight use nominal dimensions")
+    parser.set_defaults(irregular=True)
+    parser.add_argument("--irregular_fraction", type=float, default=0.20, help="Fraction of affected steps per flight; rounded up and capped below half")
+    parser.add_argument("--dimension_variation", type=float, default=0.25, help="Maximum relative deviation from nominal dimensions, clipped to requested ranges")
+    parser.add_argument("--landing_depth", type=float, default=1.20, help="Top platform depth between ascent and descent, m")
     parser.add_argument("--speed", type=float, default=0.5, help="Forward velocity limit, m/s")
-    parser.add_argument("--episode_length_s", type=float, default=25.0)
+    parser.add_argument("--episode_length_s", type=float, default=45.0)
     parser.add_argument("--success_hold_s", type=float, default=0.5)
     parser.add_argument("--max_steps", type=int, help="Optional global step limit; unfinished trials remain uncompleted")
     parser.add_argument("--trace_stride", type=int, default=1)
@@ -95,6 +101,7 @@ def parse_args():
         cases = make_cases(
             args.num_envs, args.seed, args.stair_mode, args.num_steps,
             tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
+            args.irregular_fraction, args.dimension_variation, args.landing_depth,
         )
     except ValueError as error:
         parser.error(str(error))
@@ -141,12 +148,12 @@ TRACE_COLUMNS = [
     "ground_height_m", "root_clearance_m", "projected_gravity_z", "vel_x_m_s", "vel_y_m_s", "yaw_rate_rad_s",
     "command_x_m_s", "command_y_m_s", "command_yaw_rad_s", "goal_distance_m",
     "left_ankle_x_m", "left_ankle_y_m", "left_ankle_z_m", "right_ankle_x_m", "right_ankle_y_m",
-    "right_ankle_z_m", "left_contact_force_n", "right_contact_force_n", "done", "termination_reasons",
+    "right_ankle_z_m", "left_contact_force_n", "right_contact_force_n", "summit_reached", "done", "termination_reasons",
 ]
 EPISODE_COLUMNS = [
     "env_id", "episode_index", "direction", "case_seed", "outcome", "elapsed_s", "steps",
     "max_progress_fraction", "max_abs_lateral_error_m", "mean_velocity_error_m_s", "termination_reasons",
-    "spawn_x_offset_m", "spawn_y_offset_m", "spawn_yaw_offset_rad",
+    "spawn_x_offset_m", "spawn_y_offset_m", "spawn_yaw_offset_rad", "summit_reached",
 ]
 
 
@@ -292,7 +299,7 @@ def run_evaluation(args, cases, output):
                                 *velocity[:2], snapshot["yaw_rate"][env_id], *command,
                                 snapshot["goal_distance"][env_id],
                                 *snapshot["feet"][env_id][0], *snapshot["feet"][env_id][1],
-                                *snapshot["foot_forces"][env_id], int(done), "|".join(reasons),
+                                *snapshot["foot_forces"][env_id], int(snapshot["summit_reached"][env_id]), int(done), "|".join(reasons),
                             ])
                         if done:
                             episode = {
@@ -306,6 +313,7 @@ def run_evaluation(args, cases, output):
                                 "spawn_x_offset_m": snapshot["spawn_offsets"][env_id][0],
                                 "spawn_y_offset_m": snapshot["spawn_offsets"][env_id][1],
                                 "spawn_yaw_offset_rad": snapshot["spawn_offsets"][env_id][2],
+                                "summit_reached": snapshot["summit_reached"][env_id],
                             }
                             episodes.append(episode)
                             episode_writer.writerow(episode)
@@ -347,7 +355,7 @@ def run_evaluation(args, cases, output):
                 [row for row in episodes if row["direction"] == direction],
                 sum(case["direction"] == direction for case in cases) * args.episodes_per_env,
             )
-            for direction in ("up", "down") if any(case["direction"] == direction for case in cases)
+            for direction in ("up_down", "up", "down") if any(case["direction"] == direction for case in cases)
         }
         write_json(output / "summary.json", report)
         print(f"[RESULT] status={status}, outcomes={report['outcome_counts']}, summary={output / 'summary.json'}")
@@ -364,9 +372,9 @@ def main():
     output = (args.output_dir or Path("outputs/stair_eval") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")).resolve()
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "cases.json", {
-        "protocol": "straight_stairs_v1", "seed": args.seed, "cases": cases,
+        "protocol": "straight_stairs_v2", "seed": args.seed, "cases": cases,
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
-        "unknown_terrain_definition": "Novel straight-flight geometry and sampled dimensions; training-range disjointness is not claimed.",
+        "unknown_terrain_definition": "Novel stair routes with sparse dimensional deviations; training-range disjointness is not claimed.",
         "repeats": "Each lane repeats the same geometry with seeded small spawn perturbations.",
     })
     if args.dry_run:

@@ -51,7 +51,7 @@ class Mp4Recorder:
 def video_camera_pose(case, lane_y):
     """A fixed side view shows the whole selected staircase and its landing."""
     center_x = (case["lane_min_x_m"] + case["lane_max_x_m"]) / 2
-    top = max(case["start_height_m"], case["end_height_m"])
+    top = max(case["start_height_m"], case["end_height_m"], *case["surface_heights_m"])
     span = case["lane_max_x_m"] - case["lane_min_x_m"]
     eye = (center_x - 0.35 * span, lane_y - max(6.0, span), top + 3.0)
     target = (center_x, lane_y, top / 2 + 0.5)

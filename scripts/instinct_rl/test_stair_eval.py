@@ -10,12 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from stair_eval_cases import classify_episode, make_cases, summarize, surface_height
-from eval_stairs import load_policy_weights
+from eval_stairs import build_parser, load_policy_weights
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 
 
-def cases(num_envs=4, irregular=True):
-    return make_cases(num_envs, 42, "mixed", 8, (0.08, 0.20), (0.25, 0.40), 2.0, irregular)
+def cases(num_envs=4, irregular=True, mode="mixed"):
+    return make_cases(num_envs, 42, mode, 8, (0.08, 0.20), (0.25, 0.40), 2.0, irregular)
 
 
 class CaseTests(unittest.TestCase):
@@ -47,6 +47,56 @@ class CaseTests(unittest.TestCase):
         for heights in ((0, 0.2), (0.2, 0.1), (0.1, float("nan"))):
             with self.assertRaises(ValueError):
                 make_cases(2, 42, "mixed", 8, heights, (0.25, 0.4), 2.0, False)
+
+    def test_up_down_route_and_sparse_anomalies(self):
+        for seed in range(30):
+            for case in make_cases(3, seed, "up_down", 8, (0.08, 0.20), (0.25, 0.40), 2.0, True):
+                self.assertEqual(case["start_height_m"], 0)
+                self.assertEqual(case["end_height_m"], 0)
+                self.assertTrue(case["requires_summit"])
+                self.assertEqual(len(case["riser_heights_m"]), 17)
+                for flight in case["flights"]:
+                    changed = []
+                    for index, (height, depth) in enumerate(zip(flight["riser_heights_m"], flight["tread_depths_m"])):
+                        self.assertTrue(0.08 <= height <= 0.20)
+                        self.assertTrue(0.25 <= depth <= 0.40)
+                        if height != case["nominal_riser_height_m"] or depth != case["nominal_tread_depth_m"]:
+                            changed.append(index)
+                    self.assertEqual(changed, flight["anomalous_step_indices"])
+                    self.assertEqual(len(changed), 2)
+                up, down = case["flights"]
+                self.assertAlmostEqual(sum(up["riser_heights_m"]), sum(down["riser_heights_m"]))
+                self.assertEqual(case["riser_deltas_m"][8], 0)
+                self.assertTrue(all(delta > 0 for delta in case["riser_deltas_m"][:8]))
+                self.assertTrue(all(delta < 0 for delta in case["riser_deltas_m"][9:]))
+                edge, last = case["stair_start_x_m"], 0.0
+                for delta, depth, level in zip(case["riser_deltas_m"], case["tread_depths_m"], case["surface_heights_m"]):
+                    self.assertAlmostEqual(level - last, delta)
+                    self.assertAlmostEqual(surface_height(case, edge + depth / 2), level)
+                    edge, last = edge + depth, level
+                self.assertAlmostEqual(edge, case["stair_end_x_m"])
+                center = (case["summit_start_x_m"] + case["summit_end_x_m"]) / 2
+                self.assertAlmostEqual(surface_height(case, center), case["summit_height_m"])
+
+    def test_sparse_boundaries_fixed_dimensions_and_defaults(self):
+        args = build_parser().parse_args(["--load_run", "unused", "--checkpoint", "model.pt"])
+        self.assertEqual(args.stair_mode, "up_down")
+        self.assertTrue(args.irregular)
+        self.assertEqual(args.episode_length_s, 45)
+        for height_range, depth_range in (((0.12, 0.12), (0.25, 0.4)), ((0.08, 0.2), (0.3, 0.3))):
+            for count in (3, 4, 8):
+                for case in make_cases(20, 42, "up_down", count, height_range, depth_range, 2, True, 0.49):
+                    self.assertLess(case["anomalous_steps_per_flight"], count / 2)
+                    for flight in case["flights"]:
+                        changed = sum(h != case["nominal_riser_height_m"] or d != case["nominal_tread_depth_m"]
+                                      for h, d in zip(flight["riser_heights_m"], flight["tread_depths_m"]))
+                        self.assertEqual(changed, case["anomalous_steps_per_flight"])
+        with self.assertRaises(ValueError):
+            make_cases(1, 42, "up_down", 2, (0.08, 0.2), (0.25, 0.4), 2, True)
+        with self.assertRaises(ValueError):
+            make_cases(1, 42, "up_down", 8, (0.12, 0.12), (0.3, 0.3), 2, True)
+        regular = cases(1, irregular=False, mode="up_down")[0]
+        self.assertTrue(all(not flight["anomalous_step_indices"] for flight in regular["flights"]))
 
     def test_failure_precedes_success_and_timeout(self):
         self.assertEqual(classify_episode({"stair_success": True, "base_contact": True}), "base_contact")
@@ -88,9 +138,9 @@ class TensorMetricTests(unittest.TestCase):
         }
         exec(compile(metric_tree, str(path), "exec"), cls.namespace)
 
-    def make_env(self):
+    def make_env(self, mode="mixed"):
         torch = self.torch
-        staircase_cases = cases(2)
+        staircase_cases = cases(2, mode=mode)
         origins = torch.tensor([[0, 0, case["start_height_m"]] for case in staircase_cases])
         data = SimpleNamespace(
             root_pos_w=torch.tensor([[case["goal_x_m"], 0, case["end_height_m"] + 0.9] for case in staircase_cases]),
@@ -144,6 +194,49 @@ class TensorMetricTests(unittest.TestCase):
         self.assertTrue(self.torch.equal(term.snapshot["pos"], terminal))
         self.assertEqual(term.hold_steps.tolist(), [0, 0])
 
+    def test_complete_route_requires_supported_summit_before_final_goal(self):
+        env = self.make_env(mode="up_down")
+        term = self.namespace["StairSuccess"](None, env)
+        torch = self.torch
+        # Final-goal coordinates alone must never satisfy the combined route.
+        for _ in range(30):
+            self.assertEqual(term(env).tolist(), [False, False])
+        self.assertEqual(term.summit_reached.tolist(), [False, False])
+        final_pos = env.scene["robot"].data.root_pos_w.clone()
+        final_feet = env.scene["robot"].data.body_pos_w.clone()
+        for env_id, case in enumerate(cases(2, mode="up_down")):
+            x = (case["summit_start_x_m"] + case["summit_end_x_m"]) / 2
+            env.scene["robot"].data.root_pos_w[env_id] = torch.tensor([x, 0, case["summit_height_m"] + 0.9])
+            env.scene["robot"].data.body_pos_w[env_id, :, 0] = torch.tensor([x - 0.1, x + 0.1])
+            env.scene["robot"].data.body_pos_w[env_id, :, 2] = case["summit_height_m"] + 0.06
+        env.scene["contact_forces"].data.net_forces_w[:] = 0
+        term(env)
+        self.assertEqual(term.summit_reached.tolist(), [False, False])
+        env.scene["contact_forces"].data.net_forces_w[:, :, 2] = 50
+        term(env)
+        self.assertEqual(term.summit_reached.tolist(), [True, True])
+        env.scene["robot"].data.root_pos_w[:] = final_pos
+        env.scene["robot"].data.body_pos_w[:] = final_feet
+        for _ in range(24):
+            self.assertEqual(term(env).tolist(), [False, False])
+        self.assertEqual(term(env).tolist(), [True, True])
+        term.reset([0])
+        self.assertEqual(term.summit_reached.tolist(), [False, True])
+        self.assertEqual(term.snapshot["summit_reached"].tolist(), [True, True])
+        self.assertEqual(term(env).tolist(), [False, True])
+
+    def test_combined_route_tensor_floor_matches_geometry_at_every_segment(self):
+        env = self.make_env(mode="up_down")
+        torch = self.torch
+        routes = cases(2, mode="up_down")
+        edges = [case["stair_start_x_m"] for case in routes]
+        for segment in range(17):
+            positions = [x + case["tread_depths_m"][segment] / 2 for x, case in zip(edges, routes)]
+            measured = self.namespace["ground_height"](env, torch.tensor(positions)).tolist()
+            for case, x, floor in zip(routes, positions, measured):
+                self.assertAlmostEqual(floor, surface_height(case, x), places=5)
+            edges = [x + case["tread_depths_m"][segment] for x, case in zip(edges, routes)]
+
     def test_checkpoint_load_preserves_policy_and_normalizer(self):
         torch = self.torch
         model, normalizer = torch.nn.Linear(3, 2), torch.nn.Linear(3, 3)
@@ -187,11 +280,11 @@ class TensorMetricTests(unittest.TestCase):
 
 class VideoTests(unittest.TestCase):
     def test_camera_frames_selected_lane(self):
-        for case in cases(2):
+        for case in cases(2) + cases(2, mode="up_down"):
             eye, target = video_camera_pose(case, -12.0)
             self.assertEqual(target[1], -12.0)
             self.assertLess(eye[1], target[1])
-            self.assertGreater(eye[2], max(case["start_height_m"], case["end_height_m"]))
+            self.assertGreater(eye[2], max(case["surface_heights_m"]))
 
     def test_renderer_warmup_and_empty_render_failure(self):
         import numpy as np
