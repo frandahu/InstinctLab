@@ -1,21 +1,74 @@
 """CPU checks for case geometry and terminal-state bookkeeping, not Isaac Sim integration."""
 
 import ast
+import contextlib
 import importlib.util
+import io
+import json
 import math
 import random
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from stair_eval_cases import classify_episode, make_cases, summarize, surface_height
 from eval_stairs import build_parser, load_policy_weights
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
+from eval_startup import StartupDiagnostics
+import eval_stairs
 
 
 def cases(num_envs=4, irregular=True, mode="mixed"):
     return make_cases(num_envs, 42, mode, 8, (0.08, 0.20), (0.25, 0.40), 2.0, irregular)
+
+
+class StartupTests(unittest.TestCase):
+    def test_failed_phase_and_traceback_survive_context_exit(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            output = Path(directory)
+            with self.assertRaisesRegex(ValueError, "saved configuration"):
+                with StartupDiagnostics(output) as diagnostics:
+                    diagnostics.phase("apply_saved_env", "env.yaml")
+                    raise ValueError("saved configuration")
+            status = json.loads((output / "startup_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["phase"], "apply_saved_env")
+            self.assertEqual(status["status"], "error")
+            self.assertIn("ValueError: saved configuration", (output / "startup_error.txt").read_text(encoding="utf-8"))
+
+    def test_main_reports_failure_before_app_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            output = Path(directory) / "new_run"
+            args = SimpleNamespace(output_dir=output, dry_run=False, seed=42)
+
+            def evaluation(args, cases, output, diagnostics):
+                diagnostics.phase("load_saved_env")
+                raise RuntimeError("configuration loading failed")
+
+            def close():
+                # Isaac shutdown must already have a durable traceback to report,
+                # even if shutdown exits before Python can print the exception.
+                self.assertIn("configuration loading failed", (output / "startup_error.txt").read_text(encoding="utf-8"))
+                raise SystemExit(0)
+
+            app = SimpleNamespace(close=close)
+            with mock.patch.object(eval_stairs, "parse_args", return_value=(args, [], lambda args: SimpleNamespace(app=app))), mock.patch.object(eval_stairs, "run_evaluation", side_effect=evaluation):
+                with self.assertRaises(SystemExit):
+                    eval_stairs.main()
+            status = json.loads((output / "startup_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["error"], "RuntimeError: configuration loading failed")
+            self.assertEqual(status["phase"], "load_saved_env")
+
+    def test_successful_return_does_not_claim_completed_trials(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            output = Path(directory)
+            with StartupDiagnostics(output) as diagnostics:
+                diagnostics.phase("evaluate_policy")
+                diagnostics.finish()
+            status = json.loads((output / "startup_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "returned")
+            self.assertIsNone(status["error"])
 
 
 class CaseTests(unittest.TestCase):

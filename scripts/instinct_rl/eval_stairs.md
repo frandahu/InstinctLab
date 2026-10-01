@@ -75,6 +75,8 @@ python scripts/instinct_rl/eval_stairs.py \
 | `cases.json` | 完整楼梯尺寸、基准尺寸、每段异常台阶索引（从 0 起）、顶部平台范围、seed、checkpoint 路径和 SHA256、配置来源 |
 | `eval_env.yaml` / `eval_agent.yaml` | 实际验证使用的配置 |
 | `staircase.mp4` | 默认输出的离屏渲染视频，H.264 编码 |
+| `startup_status.json` / `startup.log` | 启动与运行阶段、进程号、最后进入的步骤；提前退出时帮助定位 |
+| `startup_error.txt` | Python 异常完整堆栈（发生异常时生成，在关闭仿真器前写入） |
 
 `success_rate_completed` 只对已经结束的试验计算；`success_rate_planned` 用全部计划试验作分母。只在 `status=complete`、`uncompleted_episodes=0` 时报告完整测试成功率。中断或步数上限留下的试验不会被当作超时/成功。`summary.json` 的 `video` 字段记录 MP4 路径、实际帧数、FPS、观察通道和编码错误（如有）。
 
@@ -83,6 +85,32 @@ python scripts/instinct_rl/eval_stairs.py \
 比较 `model_2000` 与续训模型时，保持 seed、环境数量、楼梯参数、速度、时限、传感器和噪声设置相同。每条楼梯的重置扰动按各自 seed 与重置次数独立生成，CSV 记录实际初始扰动，便于核对。相机/观测噪声保留训练流程；不同策略导致重置时刻变化，因此不能假设噪声样本逐步完全相同。先比较成功率/终止原因，再在相同环境、相同试验编号的共同时间区间比较轨迹；不要直接比较长短不同的整段轨迹均值。使用多个 seed 增加楼梯实例，重复同一楼梯的 5 次试验不能视为 5 个不同楼梯。
 
 默认读取 `--load_run/params/env.yaml` 和 `agent.yaml`。缺失时脚本会报错；只有确认当前代码配置与训练一致时才用 `--use_current_cfg`。AMP 参考传感器保留用于现有 WasabiPPO/runner 的构造，仍需能访问训练使用的 GRAIL 数据；参考动作不进入 actor 观测，也不用于验证成功判定。这里保留训练相机/观测噪声，关闭材质随机化和间歇推力，先测楼梯几何行走能力。
+
+## 没有生成 MP4 时
+
+终端必须先出现 `[INFO] Off-screen MP4: ...`，才表示已成功编码第一帧。如果日志停在配置解析、环境创建或策略加载阶段，MP4 录制尚未启动。检查输出目录里的 `startup_status.json` 与 `startup_error.txt`，不要把初始化退出当成验证完成。阶段日志会立即刷新，Python 异常在仿真器关闭前保存和打印，避免关闭过程提前结束解释器而丢失原始报错。原生崩溃的 Python 栈写入 stderr；SIGKILL 无法由 Python 捕获，需要结合 shell 退出码定位。
+
+在服务器的 Bash 中运行下面的诊断命令（新输出目录，保留完整 stdout/stderr）：
+
+```bash
+eval_dir="outputs/stair_eval/up_down_model6000_$(date +%Y%m%d_%H%M%S)"
+python -u scripts/instinct_rl/eval_stairs.py \
+  --load_run /workspace/instinctlab/logs/instinct_rl/g1_parkour/20261001_074348_from20260930_050456 \
+  --checkpoint model_6000.pt \
+  --device cuda:0 --headless \
+  --num_envs 1 --episodes_per_env 1 --stair_mode up_down \
+  --output_dir "$eval_dir" 2>&1 | tee "${eval_dir}_console.log"
+eval_exit=${PIPESTATUS[0]}
+echo "Python exit code: $eval_exit"
+echo "Output directory: $eval_dir"
+tail -n 60 "${eval_dir}_console.log"
+cat "$eval_dir/startup_status.json"
+if [ -f "$eval_dir/startup_error.txt" ]; then
+  cat "$eval_dir/startup_error.txt"
+fi
+```
+
+`startup_status.json` 的 `returned` 仅表示 Python 验证函数已返回；是否完成全部试验仍看 `summary.json`。如果原生进程被结束，状态可能保留在 `running` 和最后进入的阶段。不要为了跳过配置报错直接加 `--use_current_cfg`，它可能改变与 checkpoint 对应的观测或网络配置。
 
 ## 无仿真预览
 

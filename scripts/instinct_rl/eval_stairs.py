@@ -16,6 +16,7 @@ from pathlib import Path
 
 from stair_eval_cases import classify_episode, make_cases, summarize
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
+from eval_startup import StartupDiagnostics
 
 
 def build_parser():
@@ -157,7 +158,8 @@ EPISODE_COLUMNS = [
 ]
 
 
-def run_evaluation(args, cases, output):
+def run_evaluation(args, cases, output, diagnostics):
+    diagnostics.phase("import_evaluation_modules")
     import gymnasium as gym
     import torch
 
@@ -170,8 +172,11 @@ def run_evaluation(args, cases, output):
     from instinctlab.tasks.parkour.config.g1.stair_eval_cfg import configure_stair_evaluation
     from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 
+    diagnostics.phase("load_agent_config", args.task)
     agent_cfg = cli_args.parse_instinct_rl_cfg(args.task, args)
+    diagnostics.phase("load_task_config", args.task)
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
+    diagnostics.phase("resolve_checkpoint", args.load_run)
     run_dir = Path(args.load_run).expanduser()
     if not run_dir.is_absolute():
         run_dir = Path("logs/instinct_rl") / agent_cfg.experiment_name / run_dir
@@ -185,14 +190,18 @@ def run_evaluation(args, cases, output):
                 f"Saved training params missing under {run_dir / 'params'}. "
                 "Use --use_current_cfg only if the current observation/action/network config matches training."
             )
+        diagnostics.phase("load_saved_env", str(env_path))
         saved_env = load_yaml(str(env_path))
+        diagnostics.phase("apply_saved_env")
         if isinstance(saved_env, dict):
             env_cfg.from_dict(saved_env)
         else:
             env_cfg = saved_env
+        diagnostics.phase("load_saved_agent", str(agent_path))
         agent_dict = load_yaml(str(agent_path))
         if not isinstance(agent_dict, dict):
             agent_dict = agent_dict.to_dict()
+    diagnostics.phase("configure_stairs")
     env_cfg = configure_stair_evaluation(
         env_cfg, cases, args.seed, args.speed, args.episode_length_s, args.success_hold_s
     )
@@ -205,6 +214,7 @@ def run_evaluation(args, cases, output):
         env_cfg.viewer.resolution = (args.video_width, args.video_height)
     agent_dict["device"] = args.device
     agent_dict["resume"] = True
+    diagnostics.phase("hash_checkpoint", str(checkpoint))
     manifest = json.loads((output / "cases.json").read_text(encoding="utf-8"))
     manifest.update({
         "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
@@ -214,8 +224,10 @@ def run_evaluation(args, cases, output):
         "step_dt_s": env_cfg.sim.dt * env_cfg.decimation,
     })
     write_json(output / "cases.json", manifest)
+    diagnostics.phase("save_eval_configs")
     dump_yaml(str(output / "eval_env.yaml"), env_cfg)
     dump_yaml(str(output / "eval_agent.yaml"), agent_dict)
+    diagnostics.phase("create_environment")
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
     episodes = []
     counters = [0] * args.num_envs
@@ -227,8 +239,11 @@ def run_evaluation(args, cases, output):
     recorder = None
     video_error = None
     try:
+        diagnostics.phase("reset_vector_environment")
         env = InstinctRlVecEnvWrapper(env)
+        diagnostics.phase("create_runner")
         runner = OnPolicyRunner(env, agent_dict, log_dir=None, device=args.device)
+        diagnostics.phase("load_policy_weights", str(checkpoint))
         load_policy_weights(runner, checkpoint)
         policy = runner.get_inference_policy(device=args.device)
         observation, _ = env.get_observations()
@@ -243,13 +258,16 @@ def run_evaluation(args, cases, output):
             raise RuntimeError(f"Unsupported policy observation terms: {policy_terms}")
         success_term = base.termination_manager.get_term_cfg("stair_success").func
         if args.video:
+            diagnostics.phase("initialize_mp4_encoder")
             recorder = Mp4Recorder(output / "staircase.mp4", fps=1.0 / (base.step_dt * args.video_stride))
+            diagnostics.phase("render_first_frame")
             recorder.append(first_render_frame(base))
-            print(f"[INFO] Off-screen MP4: {recorder.path}, lane={args.video_env_id}, fps={recorder.fps:g}")
+            print(f"[INFO] Off-screen MP4: {recorder.path}, lane={args.video_env_id}, fps={recorder.fps:g}", flush=True)
         max_steps = args.max_steps or base.max_episode_length * args.episodes_per_env
         print(f"[INFO] Checkpoint: {checkpoint}")
         print(f"[INFO] {args.num_envs} lanes, {args.episodes_per_env} trials/lane; results: {output}")
         status = "running"
+        diagnostics.phase("evaluate_policy")
         with (output / "trace.csv").open("x", newline="", encoding="utf-8") as trace_file, (
             output / "episodes.csv"
         ).open("x", newline="", encoding="utf-8") as episode_file:
@@ -324,13 +342,14 @@ def run_evaluation(args, cases, output):
                         status = "complete"
                         break
                     if total_steps % 250 == 0:
-                        print(f"[INFO] step={total_steps}, completed trials={len(episodes)}/{args.num_envs * args.episodes_per_env}")
+                        print(f"[INFO] step={total_steps}, completed trials={len(episodes)}/{args.num_envs * args.episodes_per_env}", flush=True)
                 if status != "complete":
                     status = "step_limit" if total_steps >= max_steps else "simulation_closed"
     except KeyboardInterrupt:
         status = "interrupted"
     except Exception as error:
         status, error_text = "error", str(error)
+        diagnostics.failure(error)
         raise
     finally:
         if recorder is not None:
@@ -380,12 +399,18 @@ def main():
     if args.dry_run:
         print(f"[INFO] Generated {len(cases)} cases without simulation: {output / 'cases.json'}")
         return
-    app_launcher = launcher_class(args)
-    simulation_app = app_launcher.app
-    try:
-        run_evaluation(args, cases, output)
-    finally:
-        simulation_app.close()
+    with StartupDiagnostics(output) as diagnostics:
+        diagnostics.phase("launch_isaac_sim")
+        app_launcher = launcher_class(args)
+        simulation_app = app_launcher.app
+        try:
+            run_evaluation(args, cases, output, diagnostics)
+            diagnostics.finish()
+        except BaseException as error:
+            diagnostics.failure(error)
+            raise
+        finally:
+            simulation_app.close()
 
 
 if __name__ == "__main__":
