@@ -17,7 +17,7 @@ from stair_eval_cases import classify_episode, make_cases, summarize, surface_he
 from eval_stairs import build_parser, load_policy_weights
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
-from training_yaml import load_training_yaml
+from training_yaml import load_training_yaml, restore_training_env_config
 import eval_stairs
 
 
@@ -91,6 +91,35 @@ class StartupTests(unittest.TestCase):
 
 
 class TrainingYamlTests(unittest.TestCase):
+    def test_saved_integer_seed_is_initialized_before_strict_config_restore(self):
+        saved = {"seed": 1, "scene": {"camera": {"resolution": (64, 36)}}, "action_scale": 0.25}
+        env_cfg = SimpleNamespace(seed=None)
+
+        def restore(data):
+            self.assertIs(data, saved)
+            self.assertEqual(env_cfg.seed, 1)
+            self.assertIs(type(env_cfg.seed), int)
+
+        env_cfg.from_dict = mock.Mock(side_effect=restore)
+        restore_training_env_config(env_cfg, saved)
+        env_cfg.from_dict.assert_called_once_with(saved)
+        # Evaluation later overrides the restored seed with --seed, as before.
+        env_cfg.seed = 42
+        self.assertEqual(saved["seed"], 1)
+
+    def test_seed_defaults_invalid_values_and_other_config_errors(self):
+        env_cfg = SimpleNamespace(seed=None, from_dict=mock.Mock())
+        restore_training_env_config(env_cfg, {"seed": None})
+        self.assertIsNone(env_cfg.seed)
+        restore_training_env_config(env_cfg, {"scene": {}})
+        self.assertIsNone(env_cfg.seed)
+        for seed in ("42", 1.5, True):
+            with self.assertRaises(ValueError):
+                restore_training_env_config(env_cfg, {"seed": seed})
+        env_cfg.from_dict = mock.Mock(side_effect=ValueError("camera dimensions do not match"))
+        with self.assertRaisesRegex(ValueError, "camera dimensions"):
+            restore_training_env_config(env_cfg, {"seed": 1, "scene": {"camera": {}}})
+
     def test_saved_scene_entity_slice_roundtrip_preserves_dimensions(self):
         import yaml
 

@@ -3,6 +3,20 @@
 from pathlib import Path
 
 
+def restore_training_env_config(env_cfg, saved_env):
+    """Restore the training-initialized seed before Isaac Lab's strict update."""
+    # train.py sets env_cfg.seed = agent_cfg.seed before saving env.yaml. The
+    # registry's fresh config still has seed=None, which older from_dict()
+    # rejects when merging the saved integer seed. Match training initialization
+    # first, then let Isaac Lab validate and restore every configuration field.
+    if "seed" in saved_env:
+        seed = saved_env["seed"]
+        if seed is not None and type(seed) is not int:
+            raise ValueError(f"Saved environment seed must be an integer or None, got {type(seed).__name__}")
+        env_cfg.seed = seed
+    env_cfg.from_dict(saved_env)
+
+
 def load_training_yaml(path):
     """Restore saved config values without changing PyYAML's global loaders."""
     import yaml

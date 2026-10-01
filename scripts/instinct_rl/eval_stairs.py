@@ -17,7 +17,7 @@ from pathlib import Path
 from stair_eval_cases import classify_episode, make_cases, summarize
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
-from training_yaml import load_training_yaml
+from training_yaml import load_training_yaml, restore_training_env_config
 
 
 def build_parser():
@@ -210,7 +210,7 @@ def run_evaluation(args, cases, output, diagnostics):
         diagnostics.phase("load_saved_env", str(env_path))
         saved_env = load_training_yaml(env_path)
         diagnostics.phase("apply_saved_env")
-        env_cfg.from_dict(saved_env)
+        restore_training_env_config(env_cfg, saved_env)
         diagnostics.phase("load_saved_agent", str(agent_path))
         agent_dict = load_training_yaml(agent_path)
     diagnostics.phase("configure_stairs")
