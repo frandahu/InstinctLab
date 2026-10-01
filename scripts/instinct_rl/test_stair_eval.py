@@ -91,6 +91,84 @@ class StartupTests(unittest.TestCase):
 
 
 class TrainingYamlTests(unittest.TestCase):
+    def test_nested_optional_terrain_and_sensor_values_are_initialized_together(self):
+        rough = SimpleNamespace(slope_threshold=None, horizontal_scale=None, vertical_scale=None)
+        noise = SimpleNamespace(min_value=None, max_value=None)
+        camera = SimpleNamespace(resolution=(64, 36), channels=None, noise_pipeline=[noise])
+        env_cfg = SimpleNamespace(
+            seed=None, scene=SimpleNamespace(
+                terrain=SimpleNamespace(terrain_generator=SimpleNamespace(sub_terrains={"perlin_rough": rough})),
+                camera=camera,
+            ),
+        )
+        saved = {
+            "seed": 1, "scene": {
+                "terrain": {"terrain_generator": {"sub_terrains": {"perlin_rough": {
+                    "slope_threshold": 0.75, "horizontal_scale": 0.05, "vertical_scale": 0.005,
+                }}}},
+                "camera": {"resolution": (64, 36), "channels": [0, 1], "noise_pipeline": [
+                    {"min_value": 0.1, "max_value": 3.0}
+                ]},
+            },
+        }
+
+        def strict_update(data):
+            self.assertIs(data, saved)
+            self.assertEqual(env_cfg.seed, 1)
+            self.assertEqual(rough.slope_threshold, 0.75)
+            self.assertEqual(rough.horizontal_scale, 0.05)
+            self.assertEqual(rough.vertical_scale, 0.005)
+            self.assertEqual((noise.min_value, noise.max_value), (0.1, 3.0))
+            self.assertEqual(camera.resolution, (64, 36))
+            self.assertIs(camera.noise_pipeline[0], noise)
+
+        env_cfg.from_dict = mock.Mock(side_effect=strict_update)
+        report = restore_training_env_config(env_cfg, saved)
+        self.assertEqual(len(report["initialized_optional_fields"]), 7)
+        self.assertIn("/scene/terrain/terrain_generator/sub_terrains/perlin_rough/slope_threshold", report["initialized_optional_fields"])
+        self.assertEqual(report["skipped_saved_fields"], [])
+        camera.channels.append(2)
+        self.assertEqual(saved["scene"]["camera"]["channels"], [0, 1])
+
+    def test_evaluation_skips_only_superseded_terrain_geometry(self):
+        generator = SimpleNamespace(sub_terrains={"perlin_rough": SimpleNamespace(slope_threshold=None)})
+        env_cfg = SimpleNamespace(
+            seed=None, scene=SimpleNamespace(
+                terrain=SimpleNamespace(terrain_generator=generator, friction=0.8),
+                camera=SimpleNamespace(resolution=(64, 36)),
+            ), actions=SimpleNamespace(scale=0.25),
+        )
+        saved = {
+            "seed": 1, "scene": {
+                "terrain": {"terrain_generator": {"obsolete_training_field": 1}, "friction": 0.9},
+                "camera": {"resolution": (64, 36)},
+            }, "actions": {"scale": 0.5},
+        }
+        env_cfg.from_dict = mock.Mock()
+        report = restore_training_env_config(env_cfg, saved, skip_paths=("/scene/terrain/terrain_generator",))
+        restored = env_cfg.from_dict.call_args[0][0]
+        self.assertNotIn("terrain_generator", restored["scene"]["terrain"])
+        self.assertEqual(restored["scene"]["terrain"]["friction"], 0.9)
+        self.assertEqual(restored["scene"]["camera"], saved["scene"]["camera"])
+        self.assertEqual(restored["actions"], saved["actions"])
+        self.assertIn("terrain_generator", saved["scene"]["terrain"])
+        self.assertIs(env_cfg.scene.terrain.terrain_generator, generator)
+        self.assertEqual(report["skipped_saved_fields"], ["/scene/terrain/terrain_generator"])
+
+    def test_optional_priming_does_not_disable_schema_or_concrete_type_checks(self):
+        env_cfg = SimpleNamespace(seed=None, camera=None, action_scale=0.25)
+        saved = {"seed": 1, "camera": {"resolution": (64, 36)}, "action_scale": "invalid", "unknown": 5}
+
+        def strict_update(data):
+            self.assertIsNone(env_cfg.camera)  # Never replace a typed config with a raw dict.
+            self.assertEqual(env_cfg.action_scale, 0.25)
+            self.assertFalse(hasattr(env_cfg, "unknown"))
+            raise ValueError("concrete field type mismatch")
+
+        env_cfg.from_dict = mock.Mock(side_effect=strict_update)
+        with self.assertRaisesRegex(ValueError, "concrete field type"):
+            restore_training_env_config(env_cfg, saved)
+
     def test_saved_integer_seed_is_initialized_before_strict_config_restore(self):
         saved = {"seed": 1, "scene": {"camera": {"resolution": (64, 36)}}, "action_scale": 0.25}
         env_cfg = SimpleNamespace(seed=None)

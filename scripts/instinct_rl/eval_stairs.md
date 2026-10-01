@@ -88,7 +88,9 @@ python scripts/instinct_rl/eval_stairs.py \
 
 验证脚本使用独立的 YAML 读取器兼容保存配置中的 `!!python/object/apply:builtins.slice`（例如关节/连杆选择的 `slice(None)`），并保留 tuple 等配置值。遇到这类 `ConstructorError` 时，更新本仓库即可；无需编辑旧训练 YAML 或重新训练。该兼容处理不修改 PyYAML 的全局读取器。
 
-恢复环境配置时，脚本先按训练流程初始化保存的整数 `seed`，再调用 Isaac Lab 的 `from_dict()`。这兼容旧版本中默认 `seed=None` 无法直接接受整数的类型检查；其余字段仍由原配置恢复函数校验。随后验证用 `--seed` 设置测试随机种子，默认 42。
+恢复环境配置时，脚本递归初始化已有字段中默认 `None`、但保存值为数值或其他普通配置值的可选字段（包括 seed、地形尺度、相机噪声上下限等），再调用 Isaac Lab 的 `from_dict()`。这兼容训练初始化后写入的值与旧版严格类型检查之间的差异；未知字段与已有非空字段的类型错误仍由原配置恢复函数检查，不把嵌套配置对象替换为普通字典。随后验证用 `--seed` 设置测试随机种子，默认 42。
+
+保存的 `/scene/terrain/terrain_generator` 不参与恢复，因为验证随后会明确替换为上楼—平台—下楼生成器。深度相机、观测、动作、机器人与物理参数继续读取保存配置。`cases.json` 的 `saved_config_restore` 记录初始化过的可选字段路径及跳过的训练地形路径，保存的原 YAML 不会被修改。
 
 ## 没有生成 MP4 时
 

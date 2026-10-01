@@ -199,6 +199,7 @@ def run_evaluation(args, cases, output, diagnostics):
         run_dir = Path("logs/instinct_rl") / agent_cfg.experiment_name / run_dir
     checkpoint = (run_dir / args.checkpoint).resolve(strict=True)
     env_path, agent_path = run_dir / "params/env.yaml", run_dir / "params/agent.yaml"
+    config_restore = None
     if args.use_current_cfg:
         agent_dict = agent_cfg.to_dict()
     else:
@@ -210,7 +211,15 @@ def run_evaluation(args, cases, output, diagnostics):
         diagnostics.phase("load_saved_env", str(env_path))
         saved_env = load_training_yaml(env_path)
         diagnostics.phase("apply_saved_env")
-        restore_training_env_config(env_cfg, saved_env)
+        # The evaluation generator replaces training terrain geometry entirely.
+        # Restore saved sensors/actions/physics, omitting this superseded subtree.
+        config_restore = restore_training_env_config(
+            env_cfg, saved_env, skip_paths=("/scene/terrain/terrain_generator",)
+        )
+        print(
+            f"[INFO] Restored saved environment: initialized {len(config_restore['initialized_optional_fields'])} "
+            "optional fields; training terrain generator will be replaced by evaluation stairs.", flush=True
+        )
         diagnostics.phase("load_saved_agent", str(agent_path))
         agent_dict = load_training_yaml(agent_path)
     diagnostics.phase("configure_stairs")
@@ -231,6 +240,7 @@ def run_evaluation(args, cases, output, diagnostics):
     manifest.update({
         "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
         "config_source": "current_checkout" if args.use_current_cfg else "saved_training_params",
+        "saved_config_restore": config_restore,
         "saved_env_sha256": sha256(env_path) if env_path.is_file() else None,
         "saved_agent_sha256": sha256(agent_path) if agent_path.is_file() else None,
         "step_dt_s": env_cfg.sim.dt * env_cfg.decimation,
