@@ -86,6 +86,8 @@ python scripts/instinct_rl/eval_stairs.py \
 
 默认读取 `--load_run/params/env.yaml` 和 `agent.yaml`。缺失时脚本会报错；只有确认当前代码配置与训练一致时才用 `--use_current_cfg`。AMP 参考传感器保留用于现有 WasabiPPO/runner 的构造，仍需能访问训练使用的 GRAIL 数据；参考动作不进入 actor 观测，也不用于验证成功判定。这里保留训练相机/观测噪声，关闭材质随机化和间歇推力，先测楼梯几何行走能力。
 
+验证脚本使用独立的 YAML 读取器兼容保存配置中的 `!!python/object/apply:builtins.slice`（例如关节/连杆选择的 `slice(None)`），并保留 tuple 等配置值。遇到这类 `ConstructorError` 时，更新本仓库即可；无需编辑旧训练 YAML 或重新训练。该兼容处理不修改 PyYAML 的全局读取器。
+
 ## 没有生成 MP4 时
 
 终端必须先出现 `[INFO] Off-screen MP4: ...`，才表示已成功编码第一帧。如果日志停在配置解析、环境创建或策略加载阶段，MP4 录制尚未启动。检查输出目录里的 `startup_status.json` 与 `startup_error.txt`，不要把初始化退出当成验证完成。阶段日志会立即刷新，Python 异常在仿真器关闭前保存和打印，避免关闭过程提前结束解释器而丢失原始报错。原生崩溃的 Python 栈写入 stderr；SIGKILL 无法由 Python 捕获，需要结合 shell 退出码定位。

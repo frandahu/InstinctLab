@@ -17,6 +17,7 @@ from stair_eval_cases import classify_episode, make_cases, summarize, surface_he
 from eval_stairs import build_parser, load_policy_weights
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
+from training_yaml import load_training_yaml
 import eval_stairs
 
 
@@ -69,6 +70,59 @@ class StartupTests(unittest.TestCase):
             status = json.loads((output / "startup_status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["status"], "returned")
             self.assertIsNone(status["error"])
+
+
+class TrainingYamlTests(unittest.TestCase):
+    def test_saved_scene_entity_slice_roundtrip_preserves_dimensions(self):
+        import yaml
+
+        original = {
+            "observations": {"policy": {"joint_pos": {"params": {
+                "asset_cfg": {"joint_ids": slice(None), "body_ids": slice(1, 14, 2), "name": "robot"}
+            }}}},
+            "camera": {"resolution": (64, 36), "clip_range": (0.1, 3.0)},
+            "action_scale": 0.25,
+        }
+        constructors_before = dict(yaml.FullLoader.yaml_constructors)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "env.yaml"
+            path.write_text(yaml.dump(original), encoding="utf-8")
+            restored = load_training_yaml(path)
+        self.assertEqual(restored, original)
+        ids = restored["observations"]["policy"]["joint_pos"]["params"]["asset_cfg"]["body_ids"]
+        self.assertEqual(list(range(29))[ids], list(range(1, 14, 2)))
+        self.assertEqual(yaml.FullLoader.yaml_constructors, constructors_before)
+
+    def test_slice_aliases_and_regular_agent_yaml(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "env.yaml"
+            path.write_text(
+                "joint_ids: &all !!python/object/apply:builtins.slice [null, null, null]\n"
+                "body_ids: *all\n", encoding="utf-8"
+            )
+            restored = load_training_yaml(path)
+            self.assertEqual(restored["joint_ids"], slice(None))
+            self.assertIs(restored["joint_ids"], restored["body_ids"])
+            agent = {"device": "cuda:1", "policy": {"hidden_dims": [512, 256, 128]}, "normalize": True}
+            path.write_text(yaml.safe_dump(agent), encoding="utf-8")
+            self.assertEqual(load_training_yaml(path), agent)
+
+    def test_invalid_slices_and_unrelated_object_constructors_are_rejected(self):
+        import yaml
+
+        for text in (
+            "ids: !!python/object/apply:builtins.slice []\n",
+            "ids: !!python/object/apply:builtins.slice [1, 2, 0]\n",
+            "ids: !!python/object/apply:builtins.slice ['invalid', null, null]\n",
+            "ids: !!python/object/apply:builtins.list [[1, 2]]\n",
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "env.yaml"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(yaml.constructor.ConstructorError):
+                    load_training_yaml(path)
 
 
 class CaseTests(unittest.TestCase):

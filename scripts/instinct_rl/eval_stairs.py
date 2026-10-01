@@ -17,6 +17,7 @@ from pathlib import Path
 from stair_eval_cases import classify_episode, make_cases, summarize
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
+from training_yaml import load_training_yaml
 
 
 def build_parser():
@@ -164,7 +165,7 @@ def run_evaluation(args, cases, output, diagnostics):
     import torch
 
     from instinct_rl.runners import OnPolicyRunner
-    from isaaclab.utils.io import dump_yaml, load_yaml
+    from isaaclab.utils.io import dump_yaml
     from isaaclab_tasks.utils import parse_env_cfg
 
     import instinctlab.tasks  # noqa: F401 -- task registration
@@ -191,16 +192,11 @@ def run_evaluation(args, cases, output, diagnostics):
                 "Use --use_current_cfg only if the current observation/action/network config matches training."
             )
         diagnostics.phase("load_saved_env", str(env_path))
-        saved_env = load_yaml(str(env_path))
+        saved_env = load_training_yaml(env_path)
         diagnostics.phase("apply_saved_env")
-        if isinstance(saved_env, dict):
-            env_cfg.from_dict(saved_env)
-        else:
-            env_cfg = saved_env
+        env_cfg.from_dict(saved_env)
         diagnostics.phase("load_saved_agent", str(agent_path))
-        agent_dict = load_yaml(str(agent_path))
-        if not isinstance(agent_dict, dict):
-            agent_dict = agent_dict.to_dict()
+        agent_dict = load_training_yaml(agent_path)
     diagnostics.phase("configure_stairs")
     env_cfg = configure_stair_evaluation(
         env_cfg, cases, args.seed, args.speed, args.episode_length_s, args.success_hold_s
