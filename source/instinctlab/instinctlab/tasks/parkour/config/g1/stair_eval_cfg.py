@@ -272,8 +272,11 @@ def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, ho
     for name, event in vars(env_cfg.events).items():
         if getattr(event, "mode", None) == "interval":
             setattr(env_cfg.events, name, None)
-    # A reference may be retained for WasabiPPO construction, but it never defines
-    # evaluation completion or enters the actor's policy observation group.
+    # Frozen-actor inference does not use AMASS motions or AMP discriminator inputs.
+    # Remove these before scene/observation managers are created so no dataset is read.
+    env_cfg.scene.motion_reference = None
+    env_cfg.observations.amp_policy = None
+    env_cfg.observations.amp_reference = None
     env_cfg.terminations.dataset_exhausted = None
     env_cfg.terminations.terrain_out_bound = None
     env_cfg.terminations.root_height = TerminationTermCfg(func=stair_root_height)

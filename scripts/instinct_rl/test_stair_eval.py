@@ -7,6 +7,7 @@ import io
 import json
 import math
 import random
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from stair_eval_cases import classify_episode, make_cases, summarize, surface_height
-from eval_stairs import build_parser, load_policy_weights
+from eval_stairs import build_inference_policy, build_parser, load_policy_weights, validate_policy_observations
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
@@ -473,22 +474,84 @@ class TensorMetricTests(unittest.TestCase):
         torch = self.torch
         model, normalizer = torch.nn.Linear(3, 2), torch.nn.Linear(3, 3)
         saved_model, saved_normalizer = torch.nn.Linear(3, 2), torch.nn.Linear(3, 3)
-        runner = SimpleNamespace(
-            cfg={}, alg=SimpleNamespace(actor_critic=model), normalizers={"policy": normalizer}
-        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
             torch.save({
                 "model_state_dict": saved_model.state_dict(),
                 "policy_normalizer_state_dict": saved_normalizer.state_dict(), "iter": 2000,
             }, path)
-            load_policy_weights(runner, path)
+            iteration = load_policy_weights(model, {"policy": normalizer}, {}, path)
             self.assertTrue(torch.equal(model.weight, saved_model.weight))
             self.assertTrue(torch.equal(normalizer.weight, saved_normalizer.weight))
-            self.assertEqual(runner.current_learning_iteration, 2000)
+            self.assertEqual(iteration, 2000)
             torch.save({"model_state_dict": saved_model.state_dict()}, path)
             with self.assertRaises(KeyError):
-                load_policy_weights(runner, path)
+                load_policy_weights(model, {"policy": normalizer}, {}, path)
+
+    def test_actor_observation_contract_excludes_critic_velocity(self):
+        terms = [
+            "base_ang_vel", "projected_gravity", "velocity_commands",
+            "joint_pos", "joint_vel", "actions", "depth_image",
+        ]
+        base = SimpleNamespace(observation_manager=SimpleNamespace(active_terms={"policy": terms}))
+        validate_policy_observations(base)
+        base.observation_manager.active_terms["policy"] = ["base_lin_vel", *terms]
+        with self.assertRaisesRegex(RuntimeError, "Unsupported policy observation"):
+            validate_policy_observations(base)
+
+    def test_inference_builds_actor_without_amp_runner_or_reference_group(self):
+        torch = self.torch
+
+        class Actor(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(3, 2)
+
+            def act_inference(self, obs):
+                return self.linear(obs)
+
+        actor, normalizer = Actor(), torch.nn.Linear(3, 3)
+        with torch.no_grad():
+            normalizer.weight.copy_(torch.eye(3))
+            normalizer.bias.zero_()
+        format_seen = []
+
+        def make_actor(class_name, cfg, obs_format, num_actions, num_rewards):
+            format_seen.append(obs_format)
+            self.assertEqual((class_name, num_actions, num_rewards), ("EncoderMoEActorCritic", 2, 1))
+            return Actor()
+
+        fake_modules = SimpleNamespace(
+            build_actor_critic=make_actor,
+            build_normalizer=lambda **kwargs: torch.nn.Linear(3, 3),
+        )
+        fake_package = SimpleNamespace(modules=fake_modules)
+        fake_utils = SimpleNamespace(get_subobs_size=lambda segment: 3)
+        env = SimpleNamespace(
+            get_obs_format=lambda: {"policy": {"depth_image": (3,)}, "critic": {"base_lin_vel": (3,)}},
+            num_actions=2, num_rewards=1,
+        )
+        cfg = {
+            "policy": {"class_name": "EncoderMoEActorCritic"},
+            "normalizers": {"policy": {"class_name": "EmpiricalNormalization"}, "critic": {"class_name": "unused"}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.pt"
+            torch.save({
+                "model_state_dict": actor.state_dict(),
+                "policy_normalizer_state_dict": normalizer.state_dict(),
+                "iter": 6000,
+            }, path)
+            with mock.patch.dict(sys.modules, {
+                "instinct_rl": fake_package,
+                "instinct_rl.utils": SimpleNamespace(),
+                "instinct_rl.utils.utils": fake_utils,
+            }):
+                policy, iteration = build_inference_policy(env, cfg, path, "cpu")
+            self.assertEqual(iteration, 6000)
+            self.assertEqual(cfg["policy"]["class_name"], "EncoderMoEActorCritic")
+            self.assertEqual(list(format_seen[0]), ["policy", "critic"])
+            self.assertTrue(torch.allclose(policy(torch.ones(1, 3)), actor.act_inference(torch.ones(1, 3))))
 
     def test_spawn_sequence_is_independent_of_other_lanes(self):
         torch = self.torch

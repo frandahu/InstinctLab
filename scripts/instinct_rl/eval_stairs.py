@@ -141,24 +141,60 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def load_policy_weights(runner, checkpoint):
-    """Load inference state via CPU so saved cuda:1 tensors cannot occupy that GPU."""
+def load_policy_weights(actor_critic, normalizers, agent_cfg, checkpoint):
+    """Load only inference state via CPU, without AMP or optimizer state."""
     import torch
 
-    if runner.cfg.get("ckpt_manipulator"):
+    if agent_cfg.get("ckpt_manipulator"):
         raise ValueError("Evaluation requires a directly loadable checkpoint; ckpt_manipulator is not supported")
     loaded = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
-    runner.alg.actor_critic.load_state_dict(loaded["model_state_dict"], strict=True)
-    normalizers = getattr(runner, "normalizers", {})
+    actor_critic.load_state_dict(loaded["model_state_dict"], strict=True)
     for group, normalizer in normalizers.items():
         key = f"{group}_normalizer_state_dict"
         if key not in loaded:
             raise KeyError(f"Checkpoint is missing required normalizer: {key}")
         normalizer.load_state_dict(loaded[key])
-    if runner.cfg.get("empirical_normalization", False) and not normalizers:
+    if agent_cfg.get("empirical_normalization", False) and not normalizers:
         raise ValueError("Legacy empirical normalization requires an explicit compatible inference loader")
-    runner.current_learning_iteration = loaded.get("iter", 0)
-    # Optimizers and AMP discriminators are unused by deterministic inference.
+    return loaded.get("iter", 0)
+
+
+def build_inference_policy(env, agent_cfg, checkpoint, device):
+    """Construct the saved actor directly; WasabiPPO is training-only machinery."""
+    from instinct_rl import modules
+    from instinct_rl.utils.utils import get_subobs_size
+
+    obs_format = env.get_obs_format()
+    policy_cfg = agent_cfg["policy"].copy()
+    actor_critic = modules.build_actor_critic(
+        policy_cfg.pop("class_name"), policy_cfg, obs_format,
+        num_actions=env.num_actions, num_rewards=env.num_rewards,
+    ).to(device)
+    normalizers = {}
+    if "policy" in agent_cfg.get("normalizers", {}):
+        cfg = agent_cfg["normalizers"]["policy"].copy()
+        normalizers["policy"] = modules.build_normalizer(
+            input_shape=get_subobs_size(obs_format["policy"]),
+            normalizer_class_name=cfg.pop("class_name"), normalizer_kwargs=cfg,
+        ).to(device)
+    iteration = load_policy_weights(actor_critic, normalizers, agent_cfg, checkpoint)
+    actor_critic.eval()
+    for normalizer in normalizers.values():
+        normalizer.eval()
+    if "policy" in normalizers:
+        return lambda obs: actor_critic.act_inference(normalizers["policy"](obs)), iteration
+    return actor_critic.act_inference, iteration
+
+
+def validate_policy_observations(base):
+    """Keep the checkpoint's actor inputs ordered and free of critic-only velocity."""
+    expected = (
+        "base_ang_vel", "projected_gravity", "velocity_commands",
+        "joint_pos", "joint_vel", "actions", "depth_image",
+    )
+    actual = tuple(base.observation_manager.active_terms["policy"])
+    if actual != expected:
+        raise RuntimeError(f"Unsupported policy observation terms: {list(actual)}; expected {list(expected)}")
 
 
 TRACE_COLUMNS = [
@@ -180,7 +216,6 @@ def run_evaluation(args, cases, output, diagnostics):
     import gymnasium as gym
     import torch
 
-    from instinct_rl.runners import OnPolicyRunner
     from isaaclab.utils.io import dump_yaml
     from isaaclab_tasks.utils import parse_env_cfg
 
@@ -234,7 +269,6 @@ def run_evaluation(args, cases, output, diagnostics):
         env_cfg.viewer.eye, env_cfg.viewer.lookat = video_camera_pose(selected, lane_y)
         env_cfg.viewer.resolution = (args.video_width, args.video_height)
     agent_dict["device"] = args.device
-    agent_dict["resume"] = True
     diagnostics.phase("hash_checkpoint", str(checkpoint))
     manifest = json.loads((output / "cases.json").read_text(encoding="utf-8"))
     manifest.update({
@@ -263,21 +297,12 @@ def run_evaluation(args, cases, output, diagnostics):
     try:
         diagnostics.phase("reset_vector_environment")
         env = InstinctRlVecEnvWrapper(env)
-        diagnostics.phase("create_runner")
-        runner = OnPolicyRunner(env, agent_dict, log_dir=None, device=args.device)
-        diagnostics.phase("load_policy_weights", str(checkpoint))
-        load_policy_weights(runner, checkpoint)
-        policy = runner.get_inference_policy(device=args.device)
-        observation, _ = env.get_observations()
         base = env.unwrapped
-        # Fail explicitly if the saved actor no longer follows this evaluator's premise.
-        policy_terms = base.observation_manager.active_terms["policy"]
-        expected_terms = {
-            "base_lin_vel", "base_ang_vel", "projected_gravity", "velocity_commands",
-            "joint_pos", "joint_vel", "actions", "depth_image",
-        }
-        if set(policy_terms) != expected_terms:
-            raise RuntimeError(f"Unsupported policy observation terms: {policy_terms}")
+        validate_policy_observations(base)
+        diagnostics.phase("load_policy_weights", str(checkpoint))
+        policy, iteration = build_inference_policy(env, agent_dict, checkpoint, args.device)
+        observation, _ = env.get_observations()
+        print(f"[INFO] Loaded inference actor from iteration {iteration}; no motion dataset or AMP runner.", flush=True)
         success_term = base.termination_manager.get_term_cfg("stair_success").func
         if args.video:
             diagnostics.phase("initialize_mp4_encoder")

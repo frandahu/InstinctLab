@@ -84,7 +84,7 @@ python scripts/instinct_rl/eval_stairs.py \
 
 比较 `model_2000` 与续训模型时，保持 seed、环境数量、楼梯参数、速度、时限、传感器和噪声设置相同。每条楼梯的重置扰动按各自 seed 与重置次数独立生成，CSV 记录实际初始扰动，便于核对。相机/观测噪声保留训练流程；不同策略导致重置时刻变化，因此不能假设噪声样本逐步完全相同。先比较成功率/终止原因，再在相同环境、相同试验编号的共同时间区间比较轨迹；不要直接比较长短不同的整段轨迹均值。使用多个 seed 增加楼梯实例，重复同一楼梯的 5 次试验不能视为 5 个不同楼梯。
 
-默认读取 `--load_run/params/env.yaml` 和 `agent.yaml`。缺失时脚本会报错；只有确认当前代码配置与训练一致时才用 `--use_current_cfg`。AMP 参考传感器保留用于现有 WasabiPPO/runner 的构造，仍需能访问训练使用的 GRAIL 数据；参考动作不进入 actor 观测，也不用于验证成功判定。这里保留训练相机/观测噪声，关闭材质随机化和间歇推力，先测楼梯几何行走能力。
+默认读取 `--load_run/params/env.yaml` 和 `agent.yaml`，以恢复 checkpoint 对应的相机、动作、actor 观测及网络配置。缺失时脚本会报错；只有确认当前代码配置与训练一致时才用 `--use_current_cfg`。验证时直接构建冻结 actor，移除场景中的动作参考和两个 AMP 观测组，因此**不读取 GRAIL/AMASS 训练动作文件**，也不构建 WasabiPPO 判别器。`base_lin_vel` 只在 critic 观测中，不是 actor 输入。这里保留训练相机/观测噪声，关闭材质随机化和间歇推力，先测楼梯几何行走能力。
 
 验证脚本使用独立的 YAML 读取器兼容保存配置中的 `!!python/object/apply:builtins.slice`（例如关节/连杆选择的 `slice(None)`），并保留 tuple 等配置值。遇到这类 `ConstructorError` 时，更新本仓库即可；无需编辑旧训练 YAML 或重新训练。该兼容处理不修改 PyYAML 的全局读取器。
 
