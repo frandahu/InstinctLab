@@ -26,7 +26,7 @@ python scripts/instinct_rl/eval_stairs.py \
   --output_dir outputs/stair_eval/model2000_up_down_seed42
 ```
 
-仿真和策略推理都使用 `--device` 指定的卡，不需要额外传 `agent.device`。checkpoint 先读到 CPU，再将策略参数复制到验证设备；不恢复优化器或 AMP 判别器，避免原 checkpoint 中的 GPU 1 张量额外占用训练卡。输出目录必须不存在，避免覆盖已有结果。此命令测试原来的 `model_2000.pt`。续训会创建新的日志目录；测试续训 checkpoint 时，把 `--load_run` 换成训练输出的实际新目录，`--checkpoint` 换成已完整保存的确切文件名。
+仿真和策略推理都使用 `--device` 指定的卡，不需要额外传 `agent.device`。checkpoint 先读到 CPU，再将策略参数复制到验证设备；不恢复优化器或 AMP 判别器，避免原 checkpoint 中的 GPU 1 张量额外占用训练卡。若输出目录已存在，脚本会自动创建同级编号目录，例如 `model2000_up_down_seed42_001`、`_002`，保留旧文件。实际路径会在启动时打印，并写入 `cases.json` 的 `output_dir`；不传 `--output_dir` 时使用自动时间戳目录。此命令测试原来的 `model_2000.pt`。续训会创建新的日志目录；测试续训 checkpoint 时，把 `--load_run` 换成训练输出的实际新目录，`--checkpoint` 换成已完整保存的确切文件名。
 
 服务器原训练 Python 环境需要 FFmpeg 编码依赖，缺失时安装一次：
 
@@ -93,6 +93,8 @@ python scripts/instinct_rl/eval_stairs.py \
 终端必须先出现 `[INFO] Off-screen MP4: ...`，才表示已成功编码第一帧。如果日志停在配置解析、环境创建或策略加载阶段，MP4 录制尚未启动。检查输出目录里的 `startup_status.json` 与 `startup_error.txt`，不要把初始化退出当成验证完成。阶段日志会立即刷新，Python 异常在仿真器关闭前保存和打印，避免关闭过程提前结束解释器而丢失原始报错。原生崩溃的 Python 栈写入 stderr；SIGKILL 无法由 Python 捕获，需要结合 shell 退出码定位。
 
 在服务器的 Bash 中运行下面的诊断命令（新输出目录，保留完整 stdout/stderr）：
+
+如果指定目录发生冲突，读取诊断文件时应改用终端 `[INFO] Results directory:` 打印的实际编号目录。
 
 ```bash
 eval_dir="outputs/stair_eval/up_down_model6000_$(date +%Y%m%d_%H%M%S)"

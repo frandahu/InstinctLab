@@ -45,7 +45,7 @@ def build_parser():
     parser.add_argument("--success_hold_s", type=float, default=0.5)
     parser.add_argument("--max_steps", type=int, help="Optional global step limit; unfinished trials remain uncompleted")
     parser.add_argument("--trace_stride", type=int, default=1)
-    parser.add_argument("--output_dir", type=Path, help="New directory; existing directories are never overwritten")
+    parser.add_argument("--output_dir", type=Path, help="Result directory; if it exists, create a new numbered sibling")
     parser.add_argument("--use_current_cfg", action="store_true", help="Explicitly use current task config instead of saved training configs")
     video = parser.add_mutually_exclusive_group()
     video.add_argument("--video", action="store_true", dest="video", help="Write staircase.mp4 (default)")
@@ -115,6 +115,22 @@ def parse_args():
 
 def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def create_output_directory(requested):
+    """Reserve a fresh directory atomically, preserving all previous results."""
+    requested = Path(requested).expanduser().resolve()
+    candidate, suffix = requested, 0
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            # A parent-file conflict must be reported, not retried indefinitely.
+            if not candidate.exists() and not candidate.is_symlink():
+                raise
+            suffix += 1
+            candidate = requested.with_name(f"{requested.name}_{suffix:03d}")
 
 
 def sha256(path):
@@ -384,10 +400,16 @@ def main():
     args, cases, launcher_class = parse_args()
     # The parser helper in this repository expects the standard runner flags.
     args.resume, args.run_name = True, None
-    output = (args.output_dir or Path("outputs/stair_eval") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    requested_output = (
+        args.output_dir or Path("outputs/stair_eval") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    ).expanduser().resolve()
+    output = create_output_directory(requested_output)
+    if output != requested_output:
+        print(f"[INFO] Output directory already exists; using a new directory: {output}", flush=True)
+    print(f"[INFO] Results directory: {output}", flush=True)
     write_json(output / "cases.json", {
         "protocol": "straight_stairs_v2", "seed": args.seed, "cases": cases,
+        "output_dir": str(output),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "unknown_terrain_definition": "Novel stair routes with sparse dimensional deviations; training-range disjointness is not claimed.",
         "repeats": "Each lane repeats the same geometry with seeded small spawn perturbations.",

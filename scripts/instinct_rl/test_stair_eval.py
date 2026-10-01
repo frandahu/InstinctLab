@@ -26,6 +26,24 @@ def cases(num_envs=4, irregular=True, mode="mixed"):
 
 
 class StartupTests(unittest.TestCase):
+    def test_repeated_dry_run_preserves_old_results_and_allocates_new_directories(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            requested = Path(directory) / "up_down_video"
+            args = SimpleNamespace(output_dir=requested, dry_run=True, seed=42)
+            with mock.patch.object(eval_stairs, "parse_args", return_value=(args, cases(1, mode="up_down"), None)):
+                eval_stairs.main()
+                original = (requested / "cases.json").read_bytes()
+                (requested / "staircase.mp4").write_bytes(b"existing video")
+                eval_stairs.main()
+                eval_stairs.main()
+            self.assertEqual((requested / "cases.json").read_bytes(), original)
+            self.assertEqual((requested / "staircase.mp4").read_bytes(), b"existing video")
+            for suffix in ("_001", "_002"):
+                actual = requested.with_name(requested.name + suffix)
+                manifest = json.loads((actual / "cases.json").read_text(encoding="utf-8"))
+                self.assertEqual(manifest["output_dir"], str(actual.resolve()))
+                self.assertEqual(manifest["cases"][0]["direction"], "up_down")
+
     def test_failed_phase_and_traceback_survive_context_exit(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             output = Path(directory)
