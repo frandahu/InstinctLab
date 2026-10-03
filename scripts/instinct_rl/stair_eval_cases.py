@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from collections import Counter
@@ -141,6 +142,24 @@ def make_cases(
             "lane_max_x_m": stair_end + 1.6,
         })
     return cases
+
+
+def make_flat_control_cases(stair_cases: list[dict]) -> list[dict]:
+    """Flatten the same routes to test locomotion without changing goals or seeds."""
+    result = copy.deepcopy(stair_cases)
+    for case in result:
+        case["control_for_direction"] = case["direction"]
+        case["direction"] = "flat"
+        case["irregular"] = False
+        case["nominal_riser_height_m"] = 0.0
+        case["anomalous_steps_per_flight"] = 0
+        case["flights"] = []
+        for key in ("riser_heights_m", "riser_deltas_m", "surface_heights_m"):
+            case[key] = [0.0] * len(case[key])
+        for key in ("start_height_m", "end_height_m", "summit_height_m", "summit_start_x_m", "summit_end_x_m"):
+            case[key] = 0.0
+        case["requires_summit"] = False
+    return result
 
 
 def surface_height(case: dict, x: float) -> float:

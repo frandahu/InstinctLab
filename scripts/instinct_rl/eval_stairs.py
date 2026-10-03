@@ -14,7 +14,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from stair_eval_cases import classify_episode, make_cases, summarize
+from stair_eval_cases import classify_episode, make_cases, make_flat_control_cases, summarize
+from policy_diagnostics import DIAGNOSTIC_COLUMNS, policy_step_diagnostics
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
@@ -29,6 +30,10 @@ def build_parser():
     parser.add_argument("--episodes_per_env", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stair_mode", choices=("up_down", "mixed", "up", "down"), default="up_down")
+    parser.add_argument(
+        "--terrain_mode", choices=("stairs", "flat"), default="stairs",
+        help="Use stairs (default) or flatten the same route for a locomotion control",
+    )
     parser.add_argument("--num_steps", type=int, default=8, help="Steps per flight (up_down has this many up AND down)")
     parser.add_argument("--step_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
     parser.add_argument("--tread_depth_range", type=float, nargs=2, default=(0.25, 0.40), metavar=("MIN", "MAX"))
@@ -113,6 +118,8 @@ def parse_args():
         )
     except ValueError as error:
         parser.error(str(error))
+    if args.terrain_mode == "flat":
+        cases = make_flat_control_cases(cases)
     args.device = args.device or "cuda:0"
     if args.video:
         args.enable_cameras = True
@@ -209,7 +216,7 @@ TRACE_COLUMNS = [
     "command_x_m_s", "command_y_m_s", "command_yaw_rad_s", "goal_distance_m",
     "left_ankle_x_m", "left_ankle_y_m", "left_ankle_z_m", "right_ankle_x_m", "right_ankle_y_m",
     "right_ankle_z_m", "left_contact_force_n", "right_contact_force_n", "summit_reached", "done", "termination_reasons",
-]
+] + DIAGNOSTIC_COLUMNS
 EPISODE_COLUMNS = [
     "env_id", "episode_index", "direction", "case_seed", "outcome", "elapsed_s", "steps",
     "max_progress_fraction", "max_abs_lateral_error_m", "mean_velocity_error_m_s", "termination_reasons",
@@ -309,6 +316,8 @@ def run_evaluation(args, cases, output, diagnostics):
         diagnostics.phase("load_policy_weights", str(checkpoint))
         policy, iteration = build_inference_policy(env, agent_dict, checkpoint, args.device)
         observation, _ = env.get_observations()
+        policy_format = env.get_obs_format()["policy"]
+        previous_actions = None
         print(f"[INFO] Loaded inference actor from iteration {iteration}; no motion dataset or AMP runner.", flush=True)
         success_term = base.termination_manager.get_term_cfg("stair_success").func
         if args.video:
@@ -336,7 +345,10 @@ def run_evaluation(args, cases, output, diagnostics):
                     actions = policy(observation)
                     if not torch.isfinite(actions).all():
                         raise RuntimeError("Nonfinite policy action; stopping before advancing physics")
+                    action_diagnostics = policy_step_diagnostics(observation, actions, previous_actions, policy_format)
+                    previous_actions = actions.detach().clone()
                     observation, _, dones, _ = env.step(actions)
+                    previous_actions[dones.bool()] = 0.0
                     total_steps += 1
                     if (
                         recorder is not None and total_steps % args.video_stride == 0
@@ -344,6 +356,9 @@ def run_evaluation(args, cases, output, diagnostics):
                     ):
                         recorder.append(base.render())
                     snapshot = {key: value.cpu().tolist() for key, value in success_term.snapshot.items()}
+                    step_diagnostics = {key: value.cpu().tolist() for key, value in action_diagnostics.items()}
+                    for key in ("joint_velocity_rms_rad_s", "applied_torque_rms_nm"):
+                        step_diagnostics[key] = snapshot[key]
                     flags = {
                         name: base.termination_manager.get_term(name).bool().cpu().tolist()
                         for name in base.termination_manager.active_terms
@@ -372,6 +387,7 @@ def run_evaluation(args, cases, output, diagnostics):
                                 snapshot["goal_distance"][env_id],
                                 *snapshot["feet"][env_id][0], *snapshot["feet"][env_id][1],
                                 *snapshot["foot_forces"][env_id], int(snapshot["summit_reached"][env_id]), int(done), "|".join(reasons),
+                                *[step_diagnostics[key][env_id] for key in DIAGNOSTIC_COLUMNS],
                             ])
                         if done:
                             episode = {
@@ -392,11 +408,25 @@ def run_evaluation(args, cases, output, diagnostics):
                             episode_file.flush()
                             counters[env_id] += 1
                             progress[env_id] = lateral[env_id] = velocity_error[env_id] = 0.0
+                    if total_steps % 250 == 0 or all(count >= args.episodes_per_env for count in counters):
+                        print(f"[INFO] step={total_steps}, completed trials={len(episodes)}/{args.num_envs * args.episodes_per_env}", flush=True)
+                        lane = args.video_env_id
+                        detail = {key: values[lane] for key, values in step_diagnostics.items()}
+                        print(
+                            f"[DIAG] env={lane}, x={snapshot['pos'][lane][0]:.3f} m, "
+                            f"command_x={snapshot['command'][lane][0]:.3f} m/s, "
+                            f"observed_command_x=[{detail['observed_command_x_min_m_s']:.3f}, "
+                            f"{detail['observed_command_x_max_m_s']:.3f}], "
+                            f"action_rms={detail['policy_action_rms']:.4f}, "
+                            f"action_delta_rms={detail['policy_action_delta_rms']:.4f}, "
+                            f"joint_velocity_rms={detail['joint_velocity_rms_rad_s']:.4f} rad/s, "
+                            f"torque_rms={detail['applied_torque_rms_nm']:.3f} Nm, "
+                            f"depth_input=[{detail['depth_input_min']:.3f}, {detail['depth_input_max']:.3f}]",
+                            flush=True,
+                        )
                     if all(count >= args.episodes_per_env for count in counters):
                         status = "complete"
                         break
-                    if total_steps % 250 == 0:
-                        print(f"[INFO] step={total_steps}, completed trials={len(episodes)}/{args.num_envs * args.episodes_per_env}", flush=True)
                 if status != "complete":
                     status = "step_limit" if total_steps >= max_steps else "simulation_closed"
     except KeyboardInterrupt:
@@ -428,7 +458,7 @@ def run_evaluation(args, cases, output, diagnostics):
                 [row for row in episodes if row["direction"] == direction],
                 sum(case["direction"] == direction for case in cases) * args.episodes_per_env,
             )
-            for direction in ("up_down", "up", "down") if any(case["direction"] == direction for case in cases)
+            for direction in ("up_down", "up", "down", "flat") if any(case["direction"] == direction for case in cases)
         }
         write_json(output / "summary.json", report)
         print(f"[RESULT] status={status}, outcomes={report['outcome_counts']}, summary={output / 'summary.json'}")
@@ -450,10 +480,14 @@ def main():
         print(f"[INFO] Output directory already exists; using a new directory: {output}", flush=True)
     print(f"[INFO] Results directory: {output}", flush=True)
     write_json(output / "cases.json", {
-        "protocol": "straight_stairs_v2", "seed": args.seed, "cases": cases,
+        "protocol": "straight_stairs_v3", "seed": args.seed, "cases": cases,
         "output_dir": str(output),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
-        "unknown_terrain_definition": "Novel stair routes with sparse dimensional deviations; training-range disjointness is not claimed.",
+        "unknown_terrain_definition": (
+            "Flat locomotion control with the same route length and goals."
+            if getattr(args, "terrain_mode", "stairs") == "flat" else
+            "Novel stair routes with sparse dimensional deviations; training-range disjointness is not claimed."
+        ),
         "repeats": "Each lane repeats the same geometry with seeded small spawn perturbations.",
     })
     if args.dry_run:

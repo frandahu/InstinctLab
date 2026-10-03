@@ -124,6 +124,35 @@ fi
 
 `startup_status.json` 的 `returned` 仅表示 Python 验证函数已返回；是否完成全部试验仍看 `summary.json`。如果原生进程被结束，状态可能保留在 `running` 和最后进入的阶段。不要为了跳过配置报错直接加 `--use_current_cfg`，它可能改变与 checkpoint 对应的观测或网络配置。
 
+## 视频中机器人几乎不动时
+
+先看 `trace.csv`：`episode_step`、身体/脚部位置、接触力是否变化，`command_x_m_s` 是否非零。真实状态基本不前进时，单凭视频无法区分训练结果与推理/执行配置问题；`status=complete` 表示试验结束，`timeout` 表示未在时限内完成，并不表示机器人走成功了。
+
+用同一 checkpoint、速度、传感器、动作配置和路线长度做平地对照。`--terrain_mode flat` 将楼梯高度全部归零，每条路线用一整块平地网格；保持起点扰动种子和目标位置，关闭顶部检查点要求。它不加载训练动作数据、不修改权重。例子最多运行 1000 步（当前配置为 20 秒），提前走到终点则提前结束：
+
+```bash
+python -u scripts/instinct_rl/eval_stairs.py \
+  --load_run /workspace/instinctlab/logs/instinct_rl/g1_parkour/20261001_074348_from20260930_050456 \
+  --checkpoint model_6000.pt \
+  --device cuda:0 --headless \
+  --num_envs 1 --episodes_per_env 1 \
+  --terrain_mode flat --max_steps 1000 \
+  --output_dir outputs/stair_eval/flat_model6000
+```
+
+每 250 步打印 `[DIAG]`；同样的数值写入 `trace.csv` 的新增列：
+
+| 列 | 含义 |
+|---|---|
+| `policy_action_rms` / `policy_action_delta_rms` | 本步网络输出及与上一步输出之差的均方根；动作单位沿用训练配置，未经动作缩放 |
+| `observed_command_x_min_m_s` / `observed_command_x_max_m_s` | 实际 actor 输入中全部指令历史帧的前进速度范围，归一化器之前；最初几步历史中可能含零 |
+| `depth_input_min` / `depth_input_max` / `depth_input_mean` | 实际 actor 深度输入经过相机处理后的范围/均值，不是原始距离，单位取决于训练配置 |
+| `joint_velocity_rms_rad_s` / `applied_torque_rms_nm` | 全部关节的实际速度/施加力矩均方根，物理步后、自动重置前采样 |
+
+平地能走、楼梯停步时，优先检查新楼梯场景的感知输入和策略泛化。平地仍停步时，先检查 actor 是否确实收到非零指令、深度输入是否合理、动作是否变化、关节是否响应；再与原训练地形的播放结果及训练速度跟踪指标对照。动作小、动作近似恒定或深度近似恒定都不能单独证明模型坏了；站立平衡也可能输出非零动作。若只有训练时带随机动作噪声才能移动，也不能据此认定确定性策略已经学会行走。
+
+平地短测结束时若 `status=step_limit`，表示没有在短测预算内结束试验，不能当作完整的 45 秒超时结果或完整楼梯成功率。
+
 ## 无仿真预览
 
 可在没有 Isaac Sim 的电脑上导出测试楼梯清单，检查尺寸与 seed：

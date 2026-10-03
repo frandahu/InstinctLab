@@ -41,6 +41,9 @@ class StaircaseGenerator:
                 spans.append((edge, edge + depth, height))
                 edge += depth
             spans.append((edge, case["lane_max_x_m"], case["end_height_m"]))
+            if case["direction"] == "flat":
+                # One slab avoids artificial collision seams in the flat control.
+                spans = [(case["lane_min_x_m"], case["lane_max_x_m"], 0.0)]
             for left, right, height in spans:
                 bottom = -0.10
                 mesh = trimesh.creation.box(extents=(right - left, case["width_m"], height - bottom))
@@ -222,6 +225,8 @@ class StairSuccess(ManagerTermBase):
             "clearance": clearance,
             "gravity_z": gravity_z.clone(),
             "velocity": robot.data.root_lin_vel_b.clone(),
+            "joint_velocity_rms_rad_s": robot.data.joint_vel.square().mean(dim=-1).sqrt(),
+            "applied_torque_rms_nm": robot.data.applied_torque.square().mean(dim=-1).sqrt(),
             "yaw_rate": robot.data.root_ang_vel_b[:, 2].clone(),
             "command": env.command_manager.get_command("base_velocity").clone(),
             "goal_distance": distance,

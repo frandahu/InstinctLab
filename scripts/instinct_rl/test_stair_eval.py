@@ -15,7 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from stair_eval_cases import classify_episode, make_cases, summarize, surface_height
+from stair_eval_cases import classify_episode, make_cases, make_flat_control_cases, summarize, surface_height
+from policy_diagnostics import policy_step_diagnostics
 from eval_stairs import build_inference_policy, build_parser, load_policy_weights, validate_policy_observations
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
@@ -254,6 +255,20 @@ class TrainingYamlTests(unittest.TestCase):
 
 
 class CaseTests(unittest.TestCase):
+    def test_flat_control_preserves_route_seed_and_has_no_elevation(self):
+        stairs = cases(2, mode="up_down")
+        original = json.dumps(stairs)
+        flat = make_flat_control_cases(stairs)
+        self.assertEqual(json.dumps(stairs), original)
+        for source, control in zip(stairs, flat):
+            for key in ("case_seed", "goal_x_m", "width_m", "lane_max_x_m", "tread_depths_m"):
+                self.assertEqual(control[key], source[key])
+            self.assertEqual(control["direction"], "flat")
+            self.assertFalse(control["requires_summit"])
+            self.assertEqual(control["flights"], [])
+            for x in (-1.0, 0.0, 1.21, 3.0, source["goal_x_m"]):
+                self.assertEqual(surface_height(control, x), 0.0)
+
     def test_seed_and_lane_extension(self):
         self.assertEqual(cases(), cases())
         self.assertEqual(cases(), cases(8)[:4])
@@ -316,6 +331,7 @@ class CaseTests(unittest.TestCase):
     def test_sparse_boundaries_fixed_dimensions_and_defaults(self):
         args = build_parser().parse_args(["--load_run", "unused", "--checkpoint", "model.pt"])
         self.assertEqual(args.stair_mode, "up_down")
+        self.assertEqual(args.terrain_mode, "stairs")
         self.assertTrue(args.irregular)
         self.assertEqual(args.episode_length_s, 45)
         for height_range, depth_range in (((0.12, 0.12), (0.25, 0.4)), ((0.08, 0.2), (0.3, 0.3))):
@@ -385,6 +401,7 @@ class TensorMetricTests(unittest.TestCase):
             ]),
             projected_gravity_b=torch.tensor([[0, 0, -1.0], [0, 0, -1.0]]),
             root_lin_vel_b=torch.zeros(2, 3), root_ang_vel_b=torch.zeros(2, 3),
+            joint_vel=torch.zeros(2, 29), applied_torque=torch.zeros(2, 29),
         )
         robot = SimpleNamespace(data=data, find_bodies=lambda *args, **kwargs: ([0, 1], []))
         contact = SimpleNamespace(
@@ -419,6 +436,8 @@ class TensorMetricTests(unittest.TestCase):
 
     def test_dwell_and_terminal_snapshot_survive_reset(self):
         env = self.make_env()
+        env.scene["robot"].data.joint_vel[:] = 2.0
+        env.scene["robot"].data.applied_torque[:] = 5.0
         term = self.namespace["StairSuccess"](None, env)
         for _ in range(24):
             self.assertEqual(term(env).tolist(), [False, False])
@@ -427,7 +446,37 @@ class TensorMetricTests(unittest.TestCase):
         term.reset([0, 1])
         env.scene["robot"].data.root_pos_w[:] = 0
         self.assertTrue(self.torch.equal(term.snapshot["pos"], terminal))
+        env.scene["robot"].data.joint_vel[:] = 0.0
+        self.assertEqual(term.snapshot["joint_velocity_rms_rad_s"].tolist(), [2.0, 2.0])
+        self.assertEqual(term.snapshot["applied_torque_rms_nm"].tolist(), [5.0, 5.0])
         self.assertEqual(term.hold_steps.tolist(), [0, 0])
+
+    def test_flat_control_success_does_not_require_stair_summit(self):
+        env = self.make_env(mode="up_down")
+        env.scene.terrain.terrain_generator.cases = make_flat_control_cases(cases(2, mode="up_down"))
+        term = self.namespace["StairSuccess"](None, env)
+        for _ in range(25):
+            result = term(env)
+        self.assertEqual(result.tolist(), [True, True])
+        self.assertEqual(term.summit_reached.tolist(), [False, False])
+
+    def test_policy_diagnostics_use_actual_command_history_and_depth_input(self):
+        torch = self.torch
+        fmt = {"base_ang_vel": (2,), "velocity_commands": (6,), "depth_image": (2, 1, 2)}
+        observation = torch.tensor([[99, 98, 0, 0, 0, 0.5, 0, 0.1, 0.1, 0.2, 0.3, 0.4]])
+        actions, previous = torch.tensor([[3.0, 4.0]]), torch.tensor([[2.0, 3.0]])
+        detail = policy_step_diagnostics(observation, actions, previous, fmt)
+        self.assertEqual(detail["observed_command_x_min_m_s"].item(), 0.0)
+        self.assertEqual(detail["observed_command_x_max_m_s"].item(), 0.5)
+        self.assertAlmostEqual(detail["depth_input_min"].item(), 0.1)
+        self.assertAlmostEqual(detail["depth_input_max"].item(), 0.4)
+        self.assertAlmostEqual(detail["depth_input_mean"].item(), 0.25)
+        self.assertAlmostEqual(detail["policy_action_rms"].item(), math.sqrt(12.5), places=5)
+        self.assertEqual(detail["policy_action_delta_rms"].item(), 1.0)
+        initial = policy_step_diagnostics(observation, actions, None, fmt)
+        self.assertEqual(initial["policy_action_delta_rms"].item(), 0.0)
+        with self.assertRaisesRegex(ValueError, "width"):
+            policy_step_diagnostics(observation[:, :-1], actions, previous, fmt)
 
     def test_complete_route_requires_supported_summit_before_final_goal(self):
         env = self.make_env(mode="up_down")
