@@ -23,6 +23,8 @@ from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
 import eval_stairs
 import render_bootstrap
+from inspect_parkour_training import read_training_metrics, saved_reward_settings
+import inspect_parkour_training
 
 
 def cases(num_envs=4, irregular=True, mode="mixed"):
@@ -332,6 +334,7 @@ class CaseTests(unittest.TestCase):
         args = build_parser().parse_args(["--load_run", "unused", "--checkpoint", "model.pt"])
         self.assertEqual(args.stair_mode, "up_down")
         self.assertEqual(args.terrain_mode, "stairs")
+        self.assertFalse(args.sample)
         self.assertTrue(args.irregular)
         self.assertEqual(args.episode_length_s, 45)
         for height_range, depth_range in (((0.12, 0.12), (0.25, 0.4)), ((0.08, 0.2), (0.3, 0.3))):
@@ -557,9 +560,13 @@ class TensorMetricTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.linear = torch.nn.Linear(3, 2)
+                self.std = torch.nn.Parameter(torch.full((2,), 0.4))
 
             def act_inference(self, obs):
                 return self.linear(obs)
+
+            def act(self, obs):
+                return torch.distributions.Normal(self.linear(obs), self.std).sample()
 
         actor, normalizer = Actor(), torch.nn.Linear(3, 3)
         with torch.no_grad():
@@ -599,10 +606,18 @@ class TensorMetricTests(unittest.TestCase):
                 "instinct_rl.utils.utils": fake_utils,
             }):
                 policy, iteration = build_inference_policy(env, cfg, path, "cpu")
+                sampled_policy, _ = build_inference_policy(env, cfg, path, "cpu", sample=True)
             self.assertEqual(iteration, 6000)
             self.assertEqual(cfg["policy"]["class_name"], "EncoderMoEActorCritic")
             self.assertEqual(list(format_seen[0]), ["policy", "critic"])
             self.assertTrue(torch.allclose(policy(torch.ones(1, 3)), actor.act_inference(torch.ones(1, 3))))
+            batch = torch.ones(4096, 3)
+            mean = policy(batch)
+            torch.manual_seed(11)
+            sampled = sampled_policy(batch)
+            self.assertFalse(torch.allclose(sampled, mean))
+            self.assertTrue(torch.allclose((sampled - mean).mean(dim=0), torch.zeros(2), atol=0.03))
+            self.assertTrue(torch.allclose((sampled - mean).std(dim=0), actor.std, atol=0.03))
 
     def test_spawn_sequence_is_independent_of_other_lanes(self):
         torch = self.torch
@@ -622,6 +637,70 @@ class TensorMetricTests(unittest.TestCase):
         reset(env_b, torch.tensor([1]))
         reset(env_b, torch.tensor([1]))
         self.assertTrue(torch.equal(env_a._stair_spawn_offsets, env_b._stair_spawn_offsets))
+
+
+class TrainingLogTests(unittest.TestCase):
+    def test_real_tensorboard_logs_filter_checkpoint_iteration_and_restart_duplicates(self):
+        from torch.utils.tensorboard import SummaryWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            tag = "Episode_Reward/rewards_track_lin_vel_xy_exp/timestep"
+            with SummaryWriter(directory) as writer:
+                writer.add_scalar(tag, 0.1, 5000, walltime=1)
+                writer.add_scalar(tag, 0.2, 5950, walltime=2)
+                writer.add_scalar(tag, 0.3, 6000, walltime=3)
+                writer.add_scalar(tag, 0.9, 6050, walltime=4)
+                writer.add_scalar(tag, 0.4, 6000, walltime=5)
+                writer.add_scalar("Policy/mean_noise_std", 0.5, 6000)
+                writer.add_scalar("Train/mean_episode_length", 998, 6000)
+                writer.add_scalar("Loss/value_function", 123, 6000)
+            metrics, tags = read_training_metrics(directory, samples=2, through_iteration=6000)
+            self.assertEqual([step for step, _ in metrics[tag]], [5950, 6000])
+            self.assertAlmostEqual(metrics[tag][-1][1], 0.4)
+            self.assertEqual(metrics["Train/mean_episode_length"], [(6000, 998.0)])
+            self.assertNotIn("Loss/value_function", metrics)
+            self.assertIn("Loss/value_function", tags)
+
+    def test_cpu_inspector_reads_saved_weights_and_config_without_simulator(self):
+        import torch
+        from torch.utils.tensorboard import SummaryWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "params").mkdir()
+            (run_dir / "params/env.yaml").write_text(
+                "rewards:\n  rewards:\n    track_lin_vel_xy_exp:\n      weight: 2.0\n"
+                "      params: {std: 0.5}\n    is_alive: {weight: 3.0}\n", encoding="utf-8",
+            )
+            path = run_dir / "model_6000.pt"
+            torch.save({"iter": 6000, "model_state_dict": {"std": torch.tensor([0.2, 0.4])}}, path)
+            with SummaryWriter(directory) as writer:
+                writer.add_scalar("Policy/mean_noise_std", 0.3, 6000)
+                writer.add_scalar("Policy/mean_noise_std", 0.1, 7000)
+            before = path.read_bytes()
+            with mock.patch.object(sys, "argv", [
+                "inspect_parkour_training.py", "--load_run", directory, "--checkpoint", path.name,
+            ]), contextlib.redirect_stdout(io.StringIO()) as output:
+                inspect_parkour_training.main()
+            text = output.getvalue()
+            self.assertIn("[ACTION_STD] mean=0.3000", text)
+            self.assertIn("[METRIC] Policy/mean_noise_std: iter=6000", text)
+            self.assertNotIn("iter=7000", text)
+            self.assertEqual(path.read_bytes(), before)
+            settings = saved_reward_settings(directory)
+            self.assertEqual(settings["rewards/track_lin_vel_xy_exp"], {"weight": 2.0, "std": 0.5})
+            # A fresh standalone reader must not initialize TensorFlow or CUDA,
+            # even on machines where TensorFlow is installed.
+            script_dir = str(Path(__file__).resolve().parent)
+            result = subprocess.run([
+                sys.executable, "-c",
+                "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "import inspect_parkour_training as inspector; inspector.main(); "
+                "import torch; assert 'tensorflow' not in sys.modules; assert not torch.cuda.is_initialized()",
+                script_dir, "--load_run", directory, "--checkpoint", path.name,
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("[ACTION_STD] mean=0.3000", result.stdout)
 
 
 class RenderBootstrapTests(unittest.TestCase):

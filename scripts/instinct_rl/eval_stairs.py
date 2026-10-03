@@ -46,6 +46,10 @@ def build_parser():
     parser.add_argument("--dimension_variation", type=float, default=0.25, help="Maximum relative deviation from nominal dimensions, clipped to requested ranges")
     parser.add_argument("--landing_depth", type=float, default=1.20, help="Top platform depth between ascent and descent, m")
     parser.add_argument("--speed", type=float, default=0.5, help="Forward velocity limit, m/s")
+    parser.add_argument(
+        "--sample", action="store_true",
+        help="Diagnostic only: sample policy actions instead of using their deterministic mean",
+    )
     parser.add_argument("--episode_length_s", type=float, default=45.0)
     parser.add_argument("--success_hold_s", type=float, default=0.5)
     parser.add_argument("--max_steps", type=int, help="Optional global step limit; unfinished trials remain uncompleted")
@@ -172,7 +176,7 @@ def load_policy_weights(actor_critic, normalizers, agent_cfg, checkpoint):
     return loaded.get("iter", 0)
 
 
-def build_inference_policy(env, agent_cfg, checkpoint, device):
+def build_inference_policy(env, agent_cfg, checkpoint, device, sample=False):
     """Construct the saved actor directly; WasabiPPO is training-only machinery."""
     from instinct_rl import modules
     from instinct_rl.utils.utils import get_subobs_size
@@ -194,9 +198,21 @@ def build_inference_policy(env, agent_cfg, checkpoint, device):
     actor_critic.eval()
     for normalizer in normalizers.values():
         normalizer.eval()
+    actor = actor_critic.act if sample else actor_critic.act_inference
+    print(f"[INFO] Policy action mode: {'sampled' if sample else 'deterministic_mean'}", flush=True)
+    if hasattr(actor_critic, "std"):
+        import torch
+
+        std = actor_critic.std.detach()
+        if not torch.isfinite(std).all() or (std <= 0).any():
+            raise ValueError("Checkpoint action standard deviation must be finite and positive")
+        print(
+            f"[INFO] Checkpoint action std: mean={std.mean().item():.4f}, "
+            f"min={std.min().item():.4f}, max={std.max().item():.4f}", flush=True,
+        )
     if "policy" in normalizers:
-        return lambda obs: actor_critic.act_inference(normalizers["policy"](obs)), iteration
-    return actor_critic.act_inference, iteration
+        return lambda obs: actor(normalizers["policy"](obs)), iteration
+    return actor, iteration
 
 
 def validate_policy_observations(base):
@@ -314,7 +330,7 @@ def run_evaluation(args, cases, output, diagnostics):
         base = env.unwrapped
         validate_policy_observations(base)
         diagnostics.phase("load_policy_weights", str(checkpoint))
-        policy, iteration = build_inference_policy(env, agent_dict, checkpoint, args.device)
+        policy, iteration = build_inference_policy(env, agent_dict, checkpoint, args.device, sample=args.sample)
         observation, _ = env.get_observations()
         policy_format = env.get_obs_format()["policy"]
         previous_actions = None
@@ -445,6 +461,7 @@ def run_evaluation(args, cases, output, diagnostics):
                 error_text = error_text or video_error
         report = summarize(episodes, args.num_envs * args.episodes_per_env)
         report.update({"status": status, "error": error_text, "simulation_steps": total_steps})
+        report["action_mode"] = "sampled" if args.sample else "deterministic_mean"
         report["video"] = {
             "enabled": args.video,
             "path": str(recorder.path) if recorder is not None else None,

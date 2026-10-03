@@ -153,6 +153,26 @@ python -u scripts/instinct_rl/eval_stairs.py \
 
 平地短测结束时若 `status=step_limit`，表示没有在短测预算内结束试验，不能当作完整的 45 秒超时结果或完整楼梯成功率。
 
+### 自动读取训练指标
+
+不必手动搜索训练终端或打开 TensorBoard 网页。在服务器仓库根目录运行：
+
+```bash
+python scripts/instinct_rl/inspect_parkour_training.py \
+  --load_run /workspace/instinctlab/logs/instinct_rl/g1_parkour/20261001_074348_from20260930_050456 \
+  --checkpoint model_6000.pt
+```
+
+脚本只读该目录的 `events.out.tfevents.*`、`params/env.yaml` 和指定 checkpoint。它不启动 Isaac Sim、不读取动作数据集、不初始化 CUDA；TensorBoard 使用自身的无 TensorFlow 兼容路径。输出 `[ACTION_STD]`、保存的奖励权重，以及速度跟踪、等待惩罚、脚部腾空、存活、动作噪声、回合长度等日志中已有指标。默认只显示 checkpoint 迭代之前每个指标的最后 3 个值；`--at_iteration` 可修改截止点，省略 checkpoint 时看最新指标。找不到日志或指标会明确报告，不能用保存的参数代替实际学习结果。
+
+奖励日志已经包含权重，且 `/sum`、`/timestep`、`/max_episode_len_s` 使用不同时间归一化，不能直接当作速度或混合比较。缺少 TensorBoard 日志时，终端中打印的训练指标也可用于检查。
+
+### 采样动作对照
+
+验证默认使用 `act_inference` 的动作均值。`--sample` 改为从同一 checkpoint 的策略分布采样，沿用训练保存的动作标准差；相机、观测归一化、动作缩放及权重不变。启动时打印动作模式和 checkpoint 的标准差，`summary.json` 记录 `action_mode`，方便区分结果。
+
+在前面的平地命令后加 `--sample`，并使用新输出目录（例如 `outputs/stair_eval/flat_model6000_sample`）。该选项只用于诊断训练采样与确定性验证的差异。若只有采样时移动，仍需检查脚步、速度跟踪和原训练地形，随机抖动、滑动或跌倒不代表学会行走；默认楼梯成功率继续使用确定性策略。
+
 ## 无仿真预览
 
 可在没有 Isaac Sim 的电脑上导出测试楼梯清单，检查尺寸与 seed：
