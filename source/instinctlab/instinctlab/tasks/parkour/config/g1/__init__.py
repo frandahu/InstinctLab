@@ -9,6 +9,16 @@ from . import agents
 
 task_entry = "instinctlab.tasks.parkour.config.g1"
 
+gym.register(
+    id="Instinct-Parkour-Stairs-Amp-G1-v1",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.stair_training_cfg:G1StairTrainingEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.stair_training_rl_cfg:G1StairPPORunnerCfg",
+    },
+)
+
 
 gym.register(
     id="Instinct-Parkour-Target-Amp-G1-v0",

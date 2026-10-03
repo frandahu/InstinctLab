@@ -283,6 +283,8 @@ def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, ho
     env_cfg.observations.amp_policy = None
     env_cfg.observations.amp_reference = None
     env_cfg.terminations.dataset_exhausted = None
+    # Training completion uses the training grid; evaluation has held-out lanes.
+    env_cfg.terminations.stair_goal = None
     env_cfg.terminations.terrain_out_bound = None
     env_cfg.terminations.root_height = TerminationTermCfg(func=stair_root_height)
     env_cfg.terminations.off_course = TerminationTermCfg(func=off_course)

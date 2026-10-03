@@ -11,6 +11,8 @@ from training_yaml import load_training_yaml
 METRIC_NAMES = (
     "track_lin_vel_xy_exp", "tracking_exp_vel_xy", "error_vel_xy",
     "dont_wait", "feet_air_time", "is_alive", "mean_noise_std", "mean_episode_length",
+    "route_progress", "terrain_level", "action_rate", "freeze_upper_body",
+    "stair_goal",
 )
 
 

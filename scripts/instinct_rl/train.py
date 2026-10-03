@@ -137,6 +137,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    if args_cli.task == "Instinct-Parkour-Stairs-Amp-G1-v1":
+        # Keep task and auxiliary reward on the same physical-time scale, even
+        # when simulation dt/decimation are changed through Hydra overrides.
+        agent_cfg.algorithm.discriminator_reward_coef = env_cfg.amp_reward_rate * env_cfg.sim.dt * env_cfg.decimation
+        env_cfg.scene.terrain.terrain_generator.seed = env_cfg.seed
+        print(
+            f"[STAIRS] step_dt={env_cfg.sim.dt * env_cfg.decimation:.6f}, "
+            f"AMP reward coef={agent_cfg.algorithm.discriminator_reward_coef:.6f}, "
+            f"resume={agent_cfg.resume}, policy={agent_cfg.policy.class_name}", flush=True
+        )
+
     # prepare configs for distributed training
     if "LOCAL_RANK" in os.environ:
         dist.init_process_group(
@@ -206,6 +217,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from instinct-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    if args_cli.task == "Instinct-Parkour-Stairs-Amp-G1-v1" and not (
+        "LOCAL_RANK" in os.environ and dist.get_rank() > 0
+    ):
+        from stair_training_runtime import save_runtime_sources
+
+        save_runtime_sources(runner, env_cfg, log_dir)
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint

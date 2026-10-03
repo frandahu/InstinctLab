@@ -93,8 +93,8 @@ def parse_args():
     parser.set_defaults(headless=True)
     args = parser.parse_args()
     args.numpy_runtime = numpy_runtime
-    if args.task != "Instinct-Parkour-Target-Amp-G1-v0":
-        parser.error("This evaluator supports Instinct-Parkour-Target-Amp-G1-v0 only")
+    if args.task not in ("Instinct-Parkour-Target-Amp-G1-v0", "Instinct-Parkour-Stairs-Amp-G1-v1"):
+        parser.error("This evaluator supports the G1 Parkour v0 and Stairs v1 tasks")
     for name in ("episodes_per_env", "trace_stride", "video_stride"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name} must be positive")
