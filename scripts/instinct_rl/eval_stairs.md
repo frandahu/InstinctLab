@@ -94,6 +94,10 @@ python scripts/instinct_rl/eval_stairs.py \
 
 ## 没有生成 MP4 时
 
+如果报错是 `render_first_frame` 阶段的 `TypeError: Unable to write from unknown dtype, kind=f, size=0`，且堆栈经过 `SyntheticData.py` 的 `dep_attrib_data.set(dep_data)`，检查 NumPy 与 Isaac Sim 的二进制接口兼容性。Isaac Lab 2.3 / Isaac Sim 4.5–5.1 要求 NumPy `<2`；仅跑策略和射线深度相机可能没有触发这条 RGB 渲染路径。
+
+评测脚本现在会在导入 AppLauncher/PyTorch 之前选择 NumPy：已有 1.x 时保持使用；检测到 2.x 时优先加载 Isaac Sim `pip_prebundle` 中适配当前 Python 的 1.26。如果未找到，自动用 `pip --no-deps --target` 将 `numpy==1.26.4` 缓存到 `outputs/stair_eval/runtime_deps/`，后续运行复用缓存。首次缓存需要网络；它不会修改训练环境的 site-packages，也不会把整个 Isaac Sim pip archive 加到 Python 搜索路径。启动日志打印实际 NumPy 版本和路径，`cases.json` 的 `numpy_runtime` 保存同样的信息。正常更新后直接使用原评测命令，无需在公共环境里降级 NumPy。
+
 终端必须先出现 `[INFO] Off-screen MP4: ...`，才表示已成功编码第一帧。如果日志停在配置解析、环境创建或策略加载阶段，MP4 录制尚未启动。检查输出目录里的 `startup_status.json` 与 `startup_error.txt`，不要把初始化退出当成验证完成。阶段日志会立即刷新，Python 异常在仿真器关闭前保存和打印，避免关闭过程提前结束解释器而丢失原始报错。原生崩溃的 Python 栈写入 stderr；SIGKILL 无法由 Python 捕获，需要结合 shell 退出码定位。
 
 在服务器的 Bash 中运行下面的诊断命令（新输出目录，保留完整 stdout/stderr）：

@@ -8,6 +8,7 @@ import json
 import math
 import random
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
 import eval_stairs
+import render_bootstrap
 
 
 def cases(num_envs=4, irregular=True, mode="mixed"):
@@ -571,6 +573,71 @@ class TensorMetricTests(unittest.TestCase):
         reset(env_b, torch.tensor([1]))
         reset(env_b, torch.tensor([1]))
         self.assertTrue(torch.equal(env_a._stair_spawn_offsets, env_b._stair_spawn_offsets))
+
+
+class RenderBootstrapTests(unittest.TestCase):
+    def test_numpy2_selects_only_bundled_numpy_before_simulator_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            default = Path(directory) / "numpy2"
+            default.mkdir()
+            (default / "version.py").write_text("version = '2.2.6'\n", encoding="utf-8")
+            bundled = Path(directory) / "prebundle" / "numpy"
+            module = SimpleNamespace(__version__="1.26.0", __file__=str(bundled / "__init__.py"))
+            original_path = sys.path.copy()
+            with mock.patch.dict(sys.modules), contextlib.redirect_stdout(io.StringIO()):
+                sys.modules.pop("numpy", None)
+                with mock.patch.object(render_bootstrap.importlib.util, "find_spec", return_value=SimpleNamespace(origin=str(default / "__init__.py"))), \
+                     mock.patch.object(render_bootstrap, "_bundled_numpy_candidates", return_value=iter([bundled])), \
+                     mock.patch.object(render_bootstrap, "_compatible_package", return_value=True), \
+                     mock.patch.object(render_bootstrap, "_cached_numpy_package") as cache, \
+                     mock.patch.object(render_bootstrap, "_load_numpy_package", return_value=module) as load:
+                    record = render_bootstrap.preload_isaac_numpy()
+            self.assertEqual(record["source"], "isaac_sim_bundle")
+            self.assertEqual(record["version"], "1.26.0")
+            load.assert_called_once_with(bundled)
+            cache.assert_not_called()
+            self.assertEqual(sys.path, original_path)
+
+    def test_loaded_numpy2_is_not_unsafely_swapped(self):
+        with mock.patch.dict(sys.modules, {"numpy": SimpleNamespace(__version__="2.2.6")}):
+            with self.assertRaisesRegex(RuntimeError, "fresh Python process"):
+                render_bootstrap.preload_isaac_numpy()
+
+    def test_missing_bundle_caches_one_wheel_without_global_pip_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_script = Path(directory) / "scripts" / "instinct_rl" / "render_bootstrap.py"
+            commands = []
+
+            def install(command, check):
+                commands.append(command)
+                package = Path(command[command.index("--target") + 1]) / "numpy"
+                (package / "core").mkdir(parents=True)
+                (package / "version.py").write_text("version = '1.26.4'\n", encoding="utf-8")
+                (package / "core" / ("_multiarray_umath" + render_bootstrap.EXTENSION_SUFFIXES[0])).touch()
+
+            with mock.patch.object(render_bootstrap, "__file__", str(fake_script)), \
+                 mock.patch.object(render_bootstrap.subprocess, "run", side_effect=install), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                package = render_bootstrap._cached_numpy_package()
+                self.assertEqual(package, render_bootstrap._cached_numpy_package())
+            self.assertEqual(len(commands), 1)
+            self.assertIn("--no-deps", commands[0])
+            self.assertEqual(commands[0][-1], "numpy==1.26.4")
+            self.assertTrue(str(package).startswith(str(Path(directory) / "outputs")))
+
+    def test_native_numpy_can_be_preloaded_without_other_package_overrides(self):
+        import numpy as np
+
+        script = (
+            "import sys; from pathlib import Path; "
+            "sys.path.insert(0, sys.argv[1]); from render_bootstrap import _load_numpy_package; "
+            "before=sys.path.copy(); np=_load_numpy_package(Path(sys.argv[2])); "
+            "assert np.array([1],dtype=np.uint64).dtype.itemsize == 8; "
+            "assert np.arange(4).sum() == 6; assert sys.path == before"
+        )
+        subprocess.run([
+            sys.executable, "-c", script, str(Path(__file__).parent), str(Path(np.__file__).parent),
+        ], check=True)
 
 
 class VideoTests(unittest.TestCase):

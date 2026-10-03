@@ -62,6 +62,7 @@ def build_parser():
 
 def parse_args():
     parser = build_parser()
+    numpy_runtime = None
     if "--dry_run" in sys.argv or "--help" in sys.argv or "-h" in sys.argv:
         # Permit a CPU-only preview on a machine without Isaac Lab.
         parser.add_argument("--device", default="cuda:0")
@@ -69,8 +70,12 @@ def parse_args():
         parser.add_argument("--enable_cameras", action="store_true")
         launcher_class = None
     else:
+        from render_bootstrap import preload_isaac_numpy
         from cudnn_bootstrap import preload_torch_cudnn
 
+        # OmniGraph/Replicator in Isaac Sim 5.x use the NumPy 1.x binary ABI.
+        # Select it before either AppLauncher or PyTorch can import NumPy 2.x.
+        numpy_runtime = preload_isaac_numpy()
         preload_torch_cudnn()
         from isaaclab.app import AppLauncher
 
@@ -78,6 +83,7 @@ def parse_args():
         launcher_class = AppLauncher
     parser.set_defaults(headless=True)
     args = parser.parse_args()
+    args.numpy_runtime = numpy_runtime
     if args.task != "Instinct-Parkour-Target-Amp-G1-v0":
         parser.error("This evaluator supports Instinct-Parkour-Target-Amp-G1-v0 only")
     for name in ("episodes_per_env", "trace_stride", "video_stride"):
@@ -274,6 +280,7 @@ def run_evaluation(args, cases, output, diagnostics):
     manifest.update({
         "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
         "config_source": "current_checkout" if args.use_current_cfg else "saved_training_params",
+        "numpy_runtime": args.numpy_runtime,
         "saved_config_restore": config_restore,
         "saved_env_sha256": sha256(env_path) if env_path.is_file() else None,
         "saved_agent_sha256": sha256(agent_path) if agent_path.is_file() else None,
