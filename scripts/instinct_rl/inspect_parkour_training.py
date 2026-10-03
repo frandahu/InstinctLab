@@ -25,6 +25,10 @@ def read_training_metrics(run_dir, samples=3, through_iteration=None):
     tags = accumulator.Tags().get("scalars", [])
     result = {}
     for tag in sorted(tags):
+        # Runner tags under /time/ use elapsed wall time as their event step.
+        # A checkpoint iteration cutoff must never be applied to that axis.
+        if "time" in tag.lower().split("/"):
+            continue
         if not any(name in tag.lower() for name in METRIC_NAMES):
             continue
         # Keep the most recently written value if a restarted run reused a step.

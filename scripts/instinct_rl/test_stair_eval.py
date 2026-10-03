@@ -653,12 +653,14 @@ class TrainingLogTests(unittest.TestCase):
                 writer.add_scalar(tag, 0.4, 6000, walltime=5)
                 writer.add_scalar("Policy/mean_noise_std", 0.5, 6000)
                 writer.add_scalar("Train/mean_episode_length", 998, 6000)
+                writer.add_scalar("Train/time/mean_episode_length", 777, 5980)
                 writer.add_scalar("Loss/value_function", 123, 6000)
             metrics, tags = read_training_metrics(directory, samples=2, through_iteration=6000)
             self.assertEqual([step for step, _ in metrics[tag]], [5950, 6000])
             self.assertAlmostEqual(metrics[tag][-1][1], 0.4)
             self.assertEqual(metrics["Train/mean_episode_length"], [(6000, 998.0)])
             self.assertNotIn("Loss/value_function", metrics)
+            self.assertNotIn("Train/time/mean_episode_length", metrics)
             self.assertIn("Loss/value_function", tags)
 
     def test_cpu_inspector_reads_saved_weights_and_config_without_simulator(self):

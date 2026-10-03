@@ -165,7 +165,7 @@ python scripts/instinct_rl/inspect_parkour_training.py \
 
 脚本只读该目录的 `events.out.tfevents.*`、`params/env.yaml` 和指定 checkpoint。它不启动 Isaac Sim、不读取动作数据集、不初始化 CUDA；TensorBoard 使用自身的无 TensorFlow 兼容路径。输出 `[ACTION_STD]`、保存的奖励权重，以及速度跟踪、等待惩罚、脚部腾空、存活、动作噪声、回合长度等日志中已有指标。默认只显示 checkpoint 迭代之前每个指标的最后 3 个值；`--at_iteration` 可修改截止点，省略 checkpoint 时看最新指标。找不到日志或指标会明确报告，不能用保存的参数代替实际学习结果。
 
-奖励日志已经包含权重，且 `/sum`、`/timestep`、`/max_episode_len_s` 使用不同时间归一化，不能直接当作速度或混合比较。缺少 TensorBoard 日志时，终端中打印的训练指标也可用于检查。
+奖励日志已经包含权重，且 `/sum`、`/timestep`、`/max_episode_len_s` 使用不同时间归一化，不能直接当作速度或混合比较。读取脚本排除 `Train/time/...` 等以运行耗时为横轴的指标，避免将耗时错误标记为 checkpoint 迭代。缺少 TensorBoard 日志时，终端中打印的训练指标也可用于检查。
 
 ### 采样动作对照
 
