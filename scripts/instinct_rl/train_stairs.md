@@ -1,5 +1,9 @@
 # 从头训练 G1 深度相机楼梯策略
 
+> 后续多地形训练请使用 [train_mixed_parkour.md](train_mixed_parkour.md) 中的
+> `Instinct-Parkour-Mixed-Amp-G1-v0`。本页保留 Stairs-v1 实验记录；其大幅修改的奖励、
+> PPO 参数和 AMP 时间缩放尚未建立稳定步行基线，不能当作上游实现的已验证修复。
+
 新任务：`Instinct-Parkour-Stairs-Amp-G1-v1`。日志目录：`logs/instinct_rl/g1_stairs_v1`。
 
 现有视频/诊断说明旧模型的动作均值没有可靠步态，加入随机采样后能前进但严重抖动。它们没有单独证明 PPO 的优化公式有错误，也不能仅用 `is_alive` 与速度奖励的权重大小确定原因。这次保留深度相机、观测历史、MoE 网络、动作缩放和 PPO/AMP，修正已检查的奖励机制，并采用独立训练配置。

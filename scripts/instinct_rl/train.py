@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import json
 import multiprocessing as mp
 import os
 import sys
@@ -34,6 +35,8 @@ parser.add_argument(
     "--logroot", type=str, default=None, help="Override default log root path, typically `log/instinct_rl/`."
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--motion_root", help="Motion dataset root for the Mixed Parkour task.")
+parser.add_argument("--motion_selection", help="Curated G1 motion YAML for the Mixed Parkour task.")
 parser.add_argument(
     "--distributed",
     action="store_true",
@@ -53,6 +56,8 @@ cli_args.add_instinct_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if (args_cli.motion_root or args_cli.motion_selection) and args_cli.task != "Instinct-Parkour-Mixed-Amp-G1-v0":
+    parser.error("--motion_root/--motion_selection are supported by Instinct-Parkour-Mixed-Amp-G1-v0")
 if "LOCAL_RANK" in os.environ:
     args_cli.distributed = True
 
@@ -137,6 +142,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    motion_inventory = None
+    if args_cli.task == "Instinct-Parkour-Mixed-Amp-G1-v0":
+        from check_parkour_motions import configure_training_motions
+
+        motion_inventory = configure_training_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
+        print(
+            f"[MIXED] motions={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}, "
+            f"AMP reward coef={agent_cfg.algorithm.discriminator_reward_coef}, "
+            f"resume={agent_cfg.resume}", flush=True,
+        )
+        print("[MIXED] terrain proportions=" + str({
+            name: cfg.proportion for name, cfg in env_cfg.scene.terrain.terrain_generator.sub_terrains.items()
+        }), flush=True)
+
     if args_cli.task == "Instinct-Parkour-Stairs-Amp-G1-v1":
         # Keep task and auxiliary reward on the same physical-time scale, even
         # when simulation dt/decimation are changed through Hydra overrides.
@@ -217,12 +236,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from instinct-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    if args_cli.task == "Instinct-Parkour-Stairs-Amp-G1-v1" and not (
+    if args_cli.task in ("Instinct-Parkour-Stairs-Amp-G1-v1", "Instinct-Parkour-Mixed-Amp-G1-v0") and not (
         "LOCAL_RANK" in os.environ and dist.get_rank() > 0
     ):
         from stair_training_runtime import save_runtime_sources
 
-        save_runtime_sources(runner, env_cfg, log_dir)
+        if motion_inventory is not None:
+            save_runtime_sources(runner, env_cfg, log_dir, filename="parkour_runtime.json")
+            with open(os.path.join(log_dir, "params", "motion_inventory.json"), "w", encoding="utf-8") as stream:
+                json.dump(motion_inventory, stream, indent=2, ensure_ascii=False)
+        else:
+            save_runtime_sources(runner, env_cfg, log_dir)
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint

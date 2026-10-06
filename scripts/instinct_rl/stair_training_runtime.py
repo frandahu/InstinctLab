@@ -1,4 +1,4 @@
-"""Capture the actual server RL implementation alongside a new stair run."""
+"""Capture the actual server RL implementation alongside a locomotion run."""
 
 import hashlib
 import inspect
@@ -6,18 +6,18 @@ import json
 from pathlib import Path
 
 
-def save_runtime_sources(runner, env_cfg, log_dir):
+def save_runtime_sources(runner, env_cfg, log_dir, filename="stair_runtime.json"):
     output = Path(log_dir) / "params"
     output.mkdir(parents=True, exist_ok=True)
     algorithm = runner.alg
     actor = algorithm.actor_critic
     step_dt = env_cfg.sim.dt * env_cfg.decimation
     metadata = dict(
-        step_dt=step_dt, amp_reward_rate=env_cfg.amp_reward_rate,
+        step_dt=step_dt, amp_reward_rate=getattr(env_cfg, "amp_reward_rate", None),
         discriminator_reward_coef=algorithm.discriminator_reward_coef,
         algorithm_class=type(algorithm).__module__ + ":" + type(algorithm).__name__,
         policy_class=type(actor).__module__ + ":" + type(actor).__name__,
-        min_noise_std=actor.min_noise_std, max_noise_std=actor.max_noise_std,
+        min_noise_std=getattr(actor, "min_noise_std", None), max_noise_std=getattr(actor, "max_noise_std", None),
         implementations={},
     )
     # Include each implementation in the MRO: Wasabi delegates reward addition
@@ -39,5 +39,5 @@ def save_runtime_sources(runner, env_cfg, log_dir):
                 source_available=True, path=path,
                 sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
             )
-    (output / "stair_runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    print(f"[STAIRS] Actual RL source and reward/noise settings saved in {output}", flush=True)
+    (output / filename).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    print(f"[RUNTIME] Actual RL source and reward/noise settings saved in {output / filename}", flush=True)

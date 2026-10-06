@@ -10,6 +10,26 @@ from . import agents
 task_entry = "instinctlab.tasks.parkour.config.g1"
 
 gym.register(
+    id="Instinct-Parkour-Mixed-Amp-G1-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.mixed_parkour_cfg:G1MixedParkourEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.mixed_parkour_rl_cfg:G1MixedParkourPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Instinct-Parkour-Mixed-Amp-G1-Play-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.mixed_parkour_cfg:G1MixedParkourEnvCfg_PLAY",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.mixed_parkour_rl_cfg:G1MixedParkourPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Instinct-Parkour-Stairs-Amp-G1-v1",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
