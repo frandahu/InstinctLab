@@ -17,6 +17,8 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+AUTHOR_ROOT = ROOT / "data/hiking_in_the_wild/parkour_motion_reference"
+AUTHOR_SELECTION = "parkour_motion_without_run.yaml"
 ROBOT = ROOT / "source/instinctlab/instinctlab/tasks/parkour/urdf/g1_29dof_torsoBase_popsicle_with_shoe.urdf"
 SUBSETS = ("curb", "slope", "stair_p1", "stair_p2")
 PATTERNS = [f"{subset}/*_retargeted.npz" for subset in SUBSETS]
@@ -102,7 +104,8 @@ def validate_selection(root, selection=None, robot_path=ROBOT):
         subset_counts[subset] += 1
         subset_weights[subset] += weight / total_weight
         total_frames += n
-        records.append(dict(path=relative, frames=n, framerate=rate, weight=weight))
+        records.append(dict(path=relative, frames=n, framerate=rate, duration_s=(n - 1) / rate, weight=weight,
+                            sha256=sha256_motion(path)))
     # Known stairs-only selections must not reproduce the old training mistake.
     active_subsets = {name for name, probability in subset_weights.items() if probability > 0}
     if active_subsets and active_subsets <= {"stair_p1", "stair_p2"}:
@@ -110,32 +113,74 @@ def validate_selection(root, selection=None, robot_path=ROBOT):
     return dict(
         root=str(root), selection=str(selection) if selection else None,
         selection_sha256=hashlib.sha256(selection.read_bytes()).hexdigest() if selection else None,
-        files=len(files), frames=total_frames, subset_counts=dict(subset_counts),
+        files=len(files), frames=total_frames, duration_s=sum(m["duration_s"] for m in records), subset_counts=dict(subset_counts),
         initial_subset_probability=dict(subset_weights), checked_files=len(records),
         validation="availability, weights, G1 joint mapping, shapes, finite values, unit quaternions; not gait quality",
         motions=records,
     )
 
 
+def sha256_motion(path):
+    digest = hashlib.sha256()
+    with open(filesystem_path(path), "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def configure_training_motions(env_cfg, motion_root=None, motion_selection=None):
     motion = env_cfg.scene.motion_reference.motion_buffers["run_walk"]
     if motion_root:
         motion.path = str(Path(motion_root).expanduser().resolve())
+        # A root override must not keep the default YAML from another root.
+        candidate = Path(motion.path) / AUTHOR_SELECTION
+        use_manifest = candidate.is_file() or candidate.parent == AUTHOR_ROOT.resolve()
+        motion.filtered_motion_selection_filepath = str(candidate) if use_manifest else None
     if motion_selection:
         motion.filtered_motion_selection_filepath = str(Path(motion_selection).expanduser().resolve())
+    if not motion.filtered_motion_selection_filepath:
+        candidate = Path(motion.path).expanduser().resolve() / AUTHOR_SELECTION
+        if candidate.is_file() or candidate.parent == AUTHOR_ROOT.resolve():
+            motion.filtered_motion_selection_filepath = str(candidate)
+    provenance = None
+    selected = motion.filtered_motion_selection_filepath
+    if (Path(motion.path).expanduser().resolve() == AUTHOR_ROOT.resolve() and selected
+            and Path(selected).expanduser().resolve() == (AUTHOR_ROOT / AUTHOR_SELECTION).resolve()):
+        from prepare_parkour_references import prepare_references
+
+        provenance = prepare_references()
     motion.subset_selection = None
     motion.file_path_patterns = None if motion.filtered_motion_selection_filepath else PATTERNS.copy()
-    return validate_selection(motion.path, motion.filtered_motion_selection_filepath, env_cfg.scene.robot.spawn.asset_path)
+    report = validate_selection(motion.path, motion.filtered_motion_selection_filepath, env_cfg.scene.robot.spawn.asset_path)
+    report["author_reference_provenance"] = provenance
+    return report
+
+
+def check_resume_motion_inventory(checkpoint, inventory):
+    """Keep an old AMP discriminator from silently resuming on different data."""
+    previous = Path(checkpoint).resolve().parent / "params/motion_inventory.json"
+    if not previous.is_file():
+        raise ValueError("Mixed Parkour resume requires params/motion_inventory.json from the original run. "
+                         "For the new author reference recipe, start fresh without --resume.")
+    old = json.loads(previous.read_text(encoding="utf-8"))
+    def signature(report):
+        return [(m.get("path"), m.get("sha256"), m.get("weight"), m.get("frames"), m.get("framerate"))
+                for m in report.get("motions", [])]
+    old_signature, new_signature = signature(old), signature(inventory)
+    if (not old_signature or any(not m[1] for m in old_signature)
+            or old_signature != new_signature):
+        raise ValueError("AMP motion references/weights differ from the saved run, or its data hashes are missing. "
+                         "Start fresh without --resume; do not reuse the old discriminator with new references.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--motion_root", default=os.environ.get("INSTINCTLAB_PARKOUR_MOTION_ROOT", os.environ.get("INSTINCTLAB_GRAIL_MOTION_ROOT")))
+    parser.add_argument("--motion_root", default=os.environ.get("INSTINCTLAB_PARKOUR_MOTION_ROOT"))
     parser.add_argument("--motion_selection", default=os.environ.get("INSTINCTLAB_PARKOUR_MOTION_SELECTION"))
     parser.add_argument("--scan", action="store_true", help="List known dataset locations and original selection manifests")
     args = parser.parse_args()
     candidates = [Path(args.motion_root).expanduser()] if args.motion_root else [
-        Path("/workspace/instinctlab/data/grail_instinctlab"), ROOT / "data/grail_instinctlab", Path.home() / "Datasets",
+        AUTHOR_ROOT, ROOT / "data/grail_instinctlab", Path.home() / "Datasets",
     ]
     if args.scan:
         for root in dict.fromkeys(Path(os.path.abspath(path)) for path in candidates):
@@ -144,9 +189,12 @@ def main():
             }, original_selection=str(root / "parkour_motion_without_run.yaml")
                 if (root / "parkour_motion_without_run.yaml").is_file() else None), ensure_ascii=False))
         return
-    root = next((path for path in candidates if path.is_dir()), candidates[0])
+    root = candidates[0]
+    selection = args.motion_selection
+    if not selection and (root / AUTHOR_SELECTION).is_file():
+        selection = root / AUTHOR_SELECTION
     try:
-        report = validate_selection(root, args.motion_selection)
+        report = validate_selection(root, selection)
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"[MOTIONS] ERROR: {error}\n")
     print(json.dumps({key: value for key, value in report.items() if key != "motions"}, indent=2, ensure_ascii=False))

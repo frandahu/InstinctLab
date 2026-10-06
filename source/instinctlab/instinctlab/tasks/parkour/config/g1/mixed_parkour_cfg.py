@@ -1,4 +1,4 @@
-"""Upstream Parkour recipe with the available multi-terrain G1 motion data.
+"""Upstream Parkour recipe with the authors' MPC + mocap walking reference.
 
 Only reference selection differs from upstream. Rewards, terrain proportions,
 curriculum, sensors, commands, resets, and joint control come from G1ParkourEnvCfg.
@@ -6,6 +6,7 @@ curriculum, sensors, commands, resets, and joint control come from G1ParkourEnvC
 
 import copy
 import os
+from pathlib import Path
 
 from isaaclab.utils import configclass
 
@@ -15,14 +16,15 @@ from .g1_parkour_target_amp_cfg import G1ParkourEnvCfg, G1ParkourEnvCfg_PLAY
 def mixed_motion_reference(reference):
     reference = copy.deepcopy(reference)
     motion = reference.motion_buffers["run_walk"]
-    motion.path = os.path.expanduser(os.environ.get(
-        "INSTINCTLAB_PARKOUR_MOTION_ROOT",
-        os.environ.get("INSTINCTLAB_GRAIL_MOTION_ROOT", "/workspace/instinctlab/data/grail_instinctlab"),
-    ))
+    default_root = Path(__file__).resolve().parents[7] / "data/hiking_in_the_wild/parkour_motion_reference"
+    root_override = os.environ.get("INSTINCTLAB_PARKOUR_MOTION_ROOT")
+    motion.path = os.path.expanduser(root_override) if root_override else str(default_root)
     selection = os.environ.get("INSTINCTLAB_PARKOUR_MOTION_SELECTION")
+    if not selection and not root_override:
+        selection = str(default_root / "parkour_motion_without_run.yaml")
     motion.filtered_motion_selection_filepath = os.path.expanduser(selection) if selection else None
     motion.subset_selection = None
-    # No implicit stairs-only fallback. A curated YAML can replace this selection.
+    # Custom roots can still explicitly select the converted GRAIL subsets.
     motion.file_path_patterns = None if selection else [
         "curb/*_retargeted.npz", "slope/*_retargeted.npz",
         "stair_p1/*_retargeted.npz", "stair_p2/*_retargeted.npz",

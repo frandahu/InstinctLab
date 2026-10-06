@@ -152,6 +152,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"AMP reward coef={agent_cfg.algorithm.discriminator_reward_coef}, "
             f"resume={agent_cfg.resume}", flush=True,
         )
+        print(f"[MIXED] motion root={motion_inventory['root']}, selection={motion_inventory['selection']}", flush=True)
         print("[MIXED] terrain proportions=" + str({
             name: cfg.proportion for name, cfg in env_cfg.scene.terrain.terrain_generator.sub_terrains.items()
         }), flush=True)
@@ -210,6 +211,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO] Resuming experiment from directory: {resume_path}")
+        if motion_inventory is not None:
+            from check_parkour_motions import check_resume_motion_inventory
+
+            check_resume_motion_inventory(resume_path, motion_inventory)
         resume_run_name = os.path.basename(os.path.dirname(resume_path))
         log_dir += f"_from{resume_run_name.split('_')[0]}_{resume_run_name.split('_')[1]}"
 

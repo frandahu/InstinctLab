@@ -1,16 +1,25 @@
 # G1 深度相机多地形训练
 
-任务：`Instinct-Parkour-Mixed-Amp-G1-v0`，日志目录：`logs/instinct_rl/g1_parkour_mixed`。
-同一个深度相机 MoE 策略在多种地形上共同训练；不为平地、楼梯或斜坡分别训练策略。
+任务：`Instinct-Parkour-Mixed-Amp-G1-v0`；日志：`logs/instinct_rl/g1_parkour_mixed`。
+同一个步行策略同时学习低起伏地面、楼梯、台阶边缘、斜坡、箱体及间隙。
 
-## 配置依据与区别
+## 作者的步行参考已经接入
 
-环境直接继承上游 `G1ParkourEnvCfg`，算法直接继承 `G1ParkourPPORunnerCfg`。
-使用原始奖励、速度指令、控制参数、传感器历史、随机化和速度跟踪地形课程，
-不继承 `Stairs-v1` 的路线课程、奖励改写或噪声上限。
-AMP 系数保持 **0.25**，不再乘 `step_dt`；初始动作标准差 1.0、学习率 0.001、
-adaptive 调度、熵系数 0.006、每轮 24 步、默认 30000 次迭代均来自原版。
-保留本分支每 1000 次保存、每 50 次日志和正常结束时显式保存最终模型的便利设置。
+默认使用作者项目页 [Data & Model](https://project-instinct.github.io/hiking-in-the-wild/) 公开的
+`parkour_motion_without_run_retargetted.npz` 和原始 `parkour_motion_without_run.yaml`。
+实测为 **18982 帧、50 Hz、379.62 秒**（首末帧时间差），包含全部 29 个 G1 关节。
+[论文 III-E](https://arxiv.org/html/2601.07718v1#S3.SS5) 说明步行参考由离线 MPC 合成步行和
+NOKOV 人体动捕经 GMR 重定向组合而成；跑步使用另一套数据和独立策略。
+公开 NPZ 没有逐帧来源标签，因此不额外猜测 MPC/动捕比例，也不自行拆分或修改动作。
+
+这次补齐的是作者发布的、包含 MPC 步行的 **AMP 参考数据**。训练和验证仍由 RL 策略输出关节目标，
+无需运行 ROS/OCS2，也没有在机器人动作后面串联在线 MPC 控制器。
+之前默认使用的 GRAIL curb/slope/stair 数据不再自动参与本任务。
+GRAIL 数据仍保留，可通过显式参数用于对照实验。
+
+环境、奖励、速度指令、控制参数、传感器历史、随机化和地形课程直接继承 `G1ParkourEnvCfg`；
+算法继承 `G1ParkourPPORunnerCfg`。AMP 系数为原版 **0.25**，不再额外乘 `step_dt`。
+不继承 `Stairs-v1` 的奖励改写或噪声上限。
 
 | 地形 | 原版比例 |
 |---|---:|
@@ -22,83 +31,71 @@ adaptive 调度、熵系数 0.006、每轮 24 步、默认 30000 次迭代均来
 | 离散箱体 / 随机箱体边缘 | 各 10% |
 | 斜坡 | 10% |
 
-10 行、20 列，初始最大难度 5，随后按原版速度跟踪得分升降级。
-各地形类型在训练中持续存在，不采用全体环境先只练平地、再全体只练楼梯的切换。
-低起伏地面不等同于专门的纯平地步行训练；需要用平地控制验证检查基础步态。
+训练持续保留各种地形，不将所有环境先后切换成纯平地、纯楼梯。
+低起伏地面不是专门的纯平地训练；基础步态须另用纯平地验证。
 
-**参考数据与上游不同**：上游使用外部 `parkour_motion_without_run.yaml`，本仓库没有提供该清单。
-默认复用现有 G1 重定向数据中的 `curb`、`slope`、`stair_p1`、`stair_p2` 四个子集。
-本地分别有 500、500、250、250 条；服务器以检查脚本实际输出为准。
-按照现有加载器逐文件等权采样，并保留原版动作课程机制；不按地形指定专家。
-这些目录名不能证明动作中包含足够的平地步行，也不能证明动作重定向质量。
-若步态仍异常，应先查看参考片段及确定性策略，不能把格式检查当成学习成功。
+## 数据准备：首次自动，之后离线复用
 
-## 先检查服务器数据
+直接运行下面的训练命令时，默认数据若缺失会自动下载作者的 11.9 MB ZIP。
+脚本只提取原始 NPZ、YAML 和说明文件到 `data/hiking_in_the_wild/parkour_motion_reference/`，
+验证固定 SHA256、G1 关节映射、数组形状、有限数值和单位四元数。
+下载内容与 ZIP 提取内容均校验，不覆盖已经被修改的同名文件。
+模型和部署说明不参与本次训练；二进制数据不提交到 Git。
+
+也可以在启动 Isaac Sim 前单独准备并检查（不需要 GPU）：
 
 ```bash
 cd /workspace/instinctlab
-python scripts/instinct_rl/check_parkour_motions.py --scan
-python scripts/instinct_rl/check_parkour_motions.py \
-  --motion_root /workspace/instinctlab/data/grail_instinctlab
+python scripts/instinct_rl/prepare_parkour_references.py
+python scripts/instinct_rl/check_parkour_motions.py
 ```
 
-第二条检查全部所选 NPZ 的文件、G1 URDF 关节映射、数组维度、有限数值和单位四元数。
-任何默认子集缺失都会明确报错，不会悄悄退回只用楼梯数据。
-正常训练也会执行该检查，并保存 `params/motion_inventory.json`，列出实际文件与初始采样概率。
-`--scan` 只检查已知数据目录和清单位置，不会遍历服务器所有磁盘。
-
-若已获得经过检查的原版或自选 G1 动作清单，在训练和检查命令中增加：
+服务器无法访问 Google Drive 时，在能访问的电脑从项目页下载 Data & Model ZIP，传到服务器：
 
 ```bash
---motion_root /实际/G1重定向动作根目录 \
---motion_selection /实际/parkour_motion_without_run.yaml
+python scripts/instinct_rl/prepare_parkour_references.py \
+  --archive /实际路径/hiking-in-the-wild_DataModel.zip
 ```
 
-清单格式示例（路径与数量必须改成真实数据）：
-
-```yaml
-selected_files:
-  - walking/example_retargeted.npz
-  - slope/example_retargeted.npz
-  - stair_p1/example_retargeted.npz
-motion_weights: [1.0, 1.0, 1.0]
-```
-
-实际加载器读取的是 `motion_weights`，不是 `weights`。
-清单覆盖默认四子集过滤；不会自动下载数据或生成未经审查的步行动作。
-也可用 `INSTINCTLAB_PARKOUR_MOTION_ROOT` / `INSTINCTLAB_PARKOUR_MOTION_SELECTION` 固定路径。
+安装成功后不再要求联网。如果上游数据包变更，校验会明确报错，避免悄悄换掉实验输入。
+`provenance.json` 记录来源、数据校验值和时长；每次训练的 `params/motion_inventory.json`
+记录实际清单、每个文件的 SHA256 和初始采样权重。
+这些检查验证数据兼容性，不能代替仿真接触验证或策略收敛验证。
 
 ## 启动检查与正式训练
 
-先用空闲 GPU 跑 5 次迭代，确认环境构建、PPO 更新和模型保存。它不能验证行走质量：
+先用空闲 GPU 跑 5 次迭代，确认环境、AMP/PPO 更新及模型保存可用：
 
 ```bash
 python -u scripts/instinct_rl/train.py \
   --task Instinct-Parkour-Mixed-Amp-G1-v0 \
   --headless --num_envs 32 --max_iterations 5 \
-  --device cuda:1 --seed 42 --run_name startup \
+  --device cuda:1 --seed 42 --run_name author_walk_startup \
   agent.device=cuda:1
 ```
 
-启动检查通过后重新从头正式训练：
+应看到 `[REFERENCES] Verified 18982 frames, 379.62 s`，以及 `[MIXED]` 打印的作者数据路径和 YAML。
+一个 NPZ 包含整套步行动作，`motions=1` 不表示只使用一种地形。
+确认实际服务器的 `params/parkour_runtime.json` 中 AMP 系数为 0.25。
+5 次迭代只验证启动，不能判断步态。
+
+通过后重新从头正式训练，使用独立运行目录：
 
 ```bash
 python -u scripts/instinct_rl/train.py \
   --task Instinct-Parkour-Mixed-Amp-G1-v0 \
   --headless --num_envs 1024 --max_iterations 30000 \
-  --device cuda:1 --seed 42 --run_name fresh_mixed \
+  --device cuda:1 --seed 42 --run_name author_walk_fresh \
   agent.device=cuda:1
 ```
 
-不加载先前失败模型。新目录独立保存策略、判别器、优化器和实际服务器实现记录
-`params/parkour_runtime.json`；配置保存在 `params/env.yaml`、`params/agent.yaml`。
-30000 是上游预算，不是成功保证。四子集动作缓存比以前只有楼梯更大；显存不足时
-先确认空闲卡并降低并行环境数，以实际启动结果决定规模。
+这次不加 `--resume`，不加载之前失败模型的策略、判别器或优化器。
+原版预算是 30000 次迭代，每 1000 次和正常结束时保存模型。
+预算不是成功保证。建议训练期间定期用同一条件验证确定性策略的平地起步，再判断楼梯能力。
 
 ## 确定性验证与 MP4
 
-先使用同一个 checkpoint 做纯平地控制验证，再测试未知楼梯。
-下面的 `实际运行目录`、`model_实际迭代数.pt` 必须替换为实际文件：
+先对新 checkpoint 做纯平地验证；下面的运行目录和模型文件须替换成实际保存的文件：
 
 ```bash
 python -u scripts/instinct_rl/eval_stairs.py \
@@ -107,15 +104,28 @@ python -u scripts/instinct_rl/eval_stairs.py \
   --checkpoint model_实际迭代数.pt \
   --device cuda:0 --headless --num_envs 1 --episodes_per_env 1 \
   --terrain_mode flat --seed 20261006 \
-  --output_dir outputs/stair_eval/mixed_flat
+  --output_dir outputs/stair_eval/author_walk_flat
 ```
 
-平地起步稳定后，在同一命令中去掉 `--terrain_mode flat`，增加 `--stair_mode up_down`，
-输出目录改为 `outputs/stair_eval/mixed_stairs`。默认输出 MP4 并采用动作均值，不加 `--sample`。
-验证读取保存的传感器和策略配置，替换为独立验证地形，不加载 AMP 动作数据或启动训练 runner。
-这两个测试覆盖平地和楼梯，不能据此声称所有坡道、箱体和间隙都已通过独立验证。
+平地起步稳定后，同一命令去掉 `--terrain_mode flat`、增加 `--stair_mode up_down`，
+输出目录改为 `outputs/stair_eval/author_walk_stairs`。
+默认输出 MP4 并使用动作均值，不加 `--sample`。
+验证读取保存的传感器与策略配置，替换独立测试地形，不加载 AMP 动作数据或训练 runner。
+平地和楼梯通过后，还需要独立测试斜坡、箱体边缘和间隙。
 
-本地仅能执行 CPU 数据检查、回归测试和语法检查，尚未完成 Isaac Sim/GPU 训练或收敛验证。
+## 自选数据对照
 
-参考：[上游环境](https://github.com/project-instinct/InstinctLab/blob/main/source/instinctlab/instinctlab/tasks/parkour/config/parkour_env_cfg.py)、
-[上游策略与算法参数](https://github.com/project-instinct/InstinctLab/blob/main/source/instinctlab/instinctlab/tasks/parkour/config/g1/agents/instinct_rl_amp_cfg.py)。
+自定义动作须显式指定根目录和清单；原版加载器使用 `motion_weights`，不是 `weights`：
+
+```bash
+--motion_root /实际/G1动作根目录 \
+--motion_selection /实际/selection.yaml
+```
+
+也支持 `INSTINCTLAB_PARKOUR_MOTION_ROOT` / `INSTINCTLAB_PARKOUR_MOTION_SELECTION`。
+只显式指定 GRAIL 根目录而没有清单时，使用 curb、slope、stair_p1、stair_p2 四个子集，缺失即报错。
+旧的 `INSTINCTLAB_GRAIL_MOTION_ROOT` 不会改变本任务默认作者数据选择。
+恢复训练时必须保持原运行的动作输入一致，不能把数据切换伪装成完全相同的断点续训。
+代码会核对原运行的文件哈希与采样权重；旧运行未记录哈希或输入有变化时，拒绝按原样断点续训。
+
+本地验证包括实际作者数据下载、解压、校验及 CPU 回归；尚未完成 Isaac Sim/GPU 训练和步态收敛验证。

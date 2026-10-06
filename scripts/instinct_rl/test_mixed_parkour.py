@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import numpy as np
 import yaml
 
-from check_parkour_motions import ROBOT, ROOT, SUBSETS, validate_selection
+from check_parkour_motions import (
+    AUTHOR_ROOT, ROBOT, ROOT, SUBSETS, check_resume_motion_inventory, configure_training_motions, validate_selection,
+)
 from stair_training_runtime import save_runtime_sources
 
 CFG = ROOT / "source/instinctlab/instinctlab/tasks/parkour/config/g1"
@@ -85,6 +87,33 @@ class SelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, message):
                 validate_selection(self.root)
 
+    def test_resume_checks_content_and_sampling_but_allows_data_relocation(self):
+        report = validate_selection(self.root)
+        params = self.root / "params"
+        params.mkdir()
+        saved = params / "motion_inventory.json"
+        saved.write_text(json.dumps(report), encoding="utf-8")
+        checkpoint = self.root / "model_1.pt"
+        relocated = dict(report, root="/new/location")
+        check_resume_motion_inventory(checkpoint, relocated)
+        self.clip("curb", joint_pos=np.ones((8, len(self.names))))
+        with self.assertRaisesRegex(ValueError, "differ"):
+            check_resume_motion_inventory(checkpoint, validate_selection(self.root))
+        saved.unlink()
+        with self.assertRaisesRegex(ValueError, "start fresh"):
+            check_resume_motion_inventory(checkpoint, report)
+
+    def test_resume_refuses_old_inventory_without_data_hashes(self):
+        report = validate_selection(self.root)
+        params = self.root / "params"
+        params.mkdir()
+        old = copy.deepcopy(report)
+        for motion in old["motions"]:
+            del motion["sha256"]
+        (params / "motion_inventory.json").write_text(json.dumps(old), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "hashes are missing"):
+            check_resume_motion_inventory(self.root / "model_1.pt", report)
+
 
 class RecipeTests(unittest.TestCase):
     def test_new_environment_and_runner_inherit_upstream_recipe(self):
@@ -103,12 +132,27 @@ class RecipeTests(unittest.TestCase):
     def test_motion_selection_does_not_mutate_other_tasks(self):
         tree = ast.parse((CFG / "mixed_parkour_cfg.py").read_text())
         fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
-        namespace = dict(copy=copy, os=SimpleNamespace(environ={}, path=__import__("os").path))
+        namespace = dict(copy=copy, os=SimpleNamespace(environ={}, path=__import__("os").path),
+                         Path=Path, __file__=str(CFG / "mixed_parkour_cfg.py"))
         exec(compile(ast.Module(body=[fn], type_ignores=[]), "mixed_reference", "exec"), namespace)
         original = SimpleNamespace(motion_buffers={"run_walk": SimpleNamespace(file_path_patterns=["stair_p1/*"])})
         result = namespace["mixed_motion_reference"](original)
         self.assertEqual(original.motion_buffers["run_walk"].file_path_patterns, ["stair_p1/*"])
-        self.assertEqual(len(result.motion_buffers["run_walk"].file_path_patterns), 4)
+        motion = result.motion_buffers["run_walk"]
+        self.assertEqual(Path(motion.path), AUTHOR_ROOT)
+        self.assertEqual(Path(motion.filtered_motion_selection_filepath), AUTHOR_ROOT / "parkour_motion_without_run.yaml")
+        self.assertIsNone(motion.file_path_patterns)
+
+    def test_explicit_root_override_does_not_load_default_author_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            motion = SimpleNamespace(path=str(AUTHOR_ROOT), filtered_motion_selection_filepath=str(AUTHOR_ROOT / "parkour_motion_without_run.yaml"))
+            env = SimpleNamespace(scene=SimpleNamespace(
+                motion_reference=SimpleNamespace(motion_buffers={"run_walk": motion}),
+                robot=SimpleNamespace(spawn=SimpleNamespace(asset_path=str(ROBOT)))))
+            with self.assertRaisesRegex(FileNotFoundError, "curb"):
+                configure_training_motions(env, motion_root=str(root))
+            self.assertIsNone(motion.filtered_motion_selection_filepath)
 
     def test_runtime_capture_accepts_original_policy_without_noise_bounds(self):
         algo = SimpleNamespace(actor_critic=SimpleNamespace(), discriminator_reward_coef=.25)
