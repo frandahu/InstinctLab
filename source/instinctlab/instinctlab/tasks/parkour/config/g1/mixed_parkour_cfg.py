@@ -1,7 +1,8 @@
 """Upstream Parkour recipe with the authors' MPC + mocap walking reference.
 
-Only reference selection differs from upstream. Rewards, terrain proportions,
-curriculum, sensors, commands, resets, and joint control come from G1ParkourEnvCfg.
+Reference selection and feet_air_time weight differ from upstream. Other rewards,
+terrain proportions, curriculum, sensors, commands, resets, and joint control
+come from G1ParkourEnvCfg.
 """
 
 import copy
@@ -37,6 +38,7 @@ class G1MixedParkourEnvCfg(G1ParkourEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.motion_reference = mixed_motion_reference(self.scene.motion_reference)
+        self.rewards.rewards.feet_air_time.weight = 0.75
 
 
 @configclass
@@ -44,3 +46,4 @@ class G1MixedParkourEnvCfg_PLAY(G1ParkourEnvCfg_PLAY):
     def __post_init__(self):
         super().__post_init__()
         self.scene.motion_reference = mixed_motion_reference(self.scene.motion_reference)
+        self.rewards.rewards.feet_air_time.weight = 0.75
