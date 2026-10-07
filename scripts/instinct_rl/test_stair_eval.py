@@ -373,7 +373,7 @@ class TensorMetricTests(unittest.TestCase):
         cls.torch = torch
         path = Path(__file__).resolve().parents[2] / "source/instinctlab/instinctlab/tasks/parkour/config/g1/stair_eval_cfg.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        names = {"_case_tensors", "ground_height", "reset_stair_root", "stair_root_height", "StairSuccess"}
+        names = {"_case_tensors", "ground_height", "reset_stair_root", "stair_root_height", "StairSuccess", "straight_velocity_command"}
         # Exercise tensor math without importing the absent Isaac Sim runtime.
         metric_tree = ast.Module(body=[node for node in tree.body if getattr(node, "name", None) in names], type_ignores=[])
 
@@ -404,6 +404,7 @@ class TensorMetricTests(unittest.TestCase):
             ]),
             projected_gravity_b=torch.tensor([[0, 0, -1.0], [0, 0, -1.0]]),
             root_lin_vel_b=torch.zeros(2, 3), root_ang_vel_b=torch.zeros(2, 3),
+            root_lin_vel_w=torch.zeros(2, 3), heading_w=torch.zeros(2),
             joint_vel=torch.zeros(2, 29), applied_torque=torch.zeros(2, 29),
         )
         robot = SimpleNamespace(data=data, find_bodies=lambda *args, **kwargs: ([0, 1], []))
@@ -453,6 +454,27 @@ class TensorMetricTests(unittest.TestCase):
         self.assertEqual(term.snapshot["joint_velocity_rms_rad_s"].tolist(), [2.0, 2.0])
         self.assertEqual(term.snapshot["applied_torque_rms_nm"].tolist(), [5.0, 5.0])
         self.assertEqual(term.hold_steps.tolist(), [0, 0])
+
+    def test_straight_command_wraps_heading_clips_yaw_and_never_requests_lateral_motion(self):
+        torch = self.torch
+        heading = torch.tensor([0., .1, -.1, math.pi / 2, 2 * math.pi + .1])
+        command = self.namespace["straight_velocity_command"](heading, .5, 1., 2.)
+        self.assertTrue(torch.allclose(command[:, 0], torch.full((5,), .5)))
+        self.assertTrue(torch.equal(command[:, 1], torch.zeros(5)))
+        self.assertTrue(torch.allclose(command[:, 2], torch.tensor([0., -.2, .2, -1., -.2]), atol=1e-5))
+
+    def test_heading_and_world_velocity_snapshot_are_separate_from_body_velocity(self):
+        env = self.make_env()
+        data = env.scene["robot"].data
+        data.root_lin_vel_b[:] = self.torch.tensor([.5, 0., 0.])
+        data.root_lin_vel_w[:] = self.torch.tensor([0., .5, 0.])
+        data.heading_w[:] = math.pi / 2
+        term = self.namespace["StairSuccess"](None, env)
+        term(env)
+        self.assertTrue(self.torch.equal(term.snapshot["velocity"], data.root_lin_vel_b))
+        self.assertTrue(self.torch.equal(term.snapshot["velocity_w"], data.root_lin_vel_w))
+        data.heading_w.zero_()
+        self.assertTrue(self.torch.allclose(term.snapshot["heading_w"], self.torch.full((2,), math.pi / 2)))
 
     def test_flat_control_success_does_not_require_stair_summit(self):
         env = self.make_env(mode="up_down")
@@ -637,9 +659,56 @@ class TensorMetricTests(unittest.TestCase):
         reset(env_b, torch.tensor([1]))
         reset(env_b, torch.tensor([1]))
         self.assertTrue(torch.equal(env_a._stair_spawn_offsets, env_b._stair_spawn_offsets))
+        reset(env_a, torch.tensor([0, 1]), centered_start=True)
+        self.assertTrue(torch.equal(env_a._stair_spawn_offsets, torch.zeros(2, 3)))
 
 
 class TrainingLogTests(unittest.TestCase):
+    def test_setup_reads_environment_count_and_verified_reference_from_saved_files(self):
+        from prepare_parkour_references import FILES
+
+        with tempfile.TemporaryDirectory() as directory:
+            params = Path(directory) / "params"
+            params.mkdir()
+            (params / "env.yaml").write_text("scene: {num_envs: 32}\n", encoding="utf-8")
+            (params / "agent.yaml").write_text(
+                "num_steps_per_env: 24\nmax_iterations: 10000\nalgorithm: {num_mini_batches: 4, discriminator_reward_coef: 0.25}\n",
+                encoding="utf-8")
+            (params / "motion_inventory.json").write_text(json.dumps({
+                "files": 1, "frames": 18982, "motions": [{"sha256": FILES["parkour_motion_without_run_retargetted.npz"][1]}],
+            }), encoding="utf-8")
+            report = inspect_parkour_training.saved_training_setup(directory)
+            self.assertEqual(report["num_envs"], 32)
+            self.assertEqual(report["transitions_per_iteration"], 768)
+            self.assertEqual(report["transitions_per_minibatch"], 192)
+            self.assertTrue(report["author_motion_hash_matches"])
+            (params / "motion_inventory.json").unlink()
+            self.assertFalse(inspect_parkour_training.saved_training_setup(directory)["author_motion_hash_matches"])
+
+    def test_trace_metrics_separate_episodes_body_speed_and_world_path(self):
+        import csv
+
+        with tempfile.TemporaryDirectory() as directory:
+            fields = ["env_id", "episode_index", "elapsed_s", "base_x_m", "base_y_m", "vel_x_m_s", "vel_y_m_s",
+                      "command_x_m_s", "command_y_m_s", "command_yaw_rad_s", "heading_w_rad"]
+            with (Path(directory) / "trace.csv").open("w", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(fields)
+                writer.writerow([0, 0, .02, 0, 0, 0, 0, .5, 0, 0, .2])
+                writer.writerow([0, 0, 1, .5, .2, .4, .1, .5, 0, -.4, .2])
+                writer.writerow([0, 0, 2, 1, .4, .4, .1, .5, 0, -.4, .2])
+                writer.writerow([0, 1, .02, 0, 0, 0, 0, .5, 0, 0, ""])
+                writer.writerow([0, 1, 1, .1, -.1, .1, -.1, .5, 0, 0, ""])
+            first, second = inspect_parkour_training.read_evaluation_metrics(directory)
+            self.assertEqual(first["moving_samples"], 2)
+            self.assertAlmostEqual(first["mean_forward_speed_body_m_s"], .4)
+            self.assertAlmostEqual(first["mean_velocity_error_body_m_s"], math.sqrt(.02))
+            self.assertAlmostEqual(first["mean_abs_command_yaw_rad_s"], .4)
+            self.assertAlmostEqual(first["net_path_angle_deg"], math.degrees(math.atan2(.4, 1)))
+            self.assertAlmostEqual(first["mean_abs_heading_world_deg"], math.degrees(.2))
+            self.assertIsNone(second["mean_abs_heading_world_deg"])
+            self.assertEqual(second["delta_x_m"], .1)
+
     def test_real_tensorboard_logs_filter_checkpoint_iteration_and_restart_duplicates(self):
         from torch.utils.tensorboard import SummaryWriter
 

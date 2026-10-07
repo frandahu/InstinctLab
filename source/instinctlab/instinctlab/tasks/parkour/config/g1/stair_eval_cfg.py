@@ -73,6 +73,30 @@ class StairGoalCommand(PoseVelocityCommand):
         self.is_standing_env[env_ids] = False
 
 
+def straight_velocity_command(heading, speed, yaw_limit, gain):
+    """Body-frame forward command and yaw feedback toward world +X.
+
+    This changes only commands given to the frozen actor; it never changes the
+    robot's pose or policy actions. Lateral command is always zero.
+    """
+    result = torch.zeros(heading.shape[0], 3, device=heading.device, dtype=heading.dtype)
+    result[:, 0] = speed
+    error = torch.atan2(torch.sin(-heading), torch.cos(-heading))
+    result[:, 2] = torch.clamp(gain * error, min=-yaw_limit, max=yaw_limit)
+    return result
+
+
+class StraightWalkCommand(StairGoalCommand):
+    """Diagnostic flat walk: hold world heading instead of steering to a goal."""
+
+    def _update_command(self):
+        super()._update_command()
+        self.vel_command_b[:] = straight_velocity_command(
+            self.robot.data.heading_w, self.cfg.ranges.lin_vel_x[1],
+            self.cfg.ranges.ang_vel_z[1], self.cfg.heading_control_stiffness,
+        )
+
+
 def _case_tensors(env):
     if not hasattr(env, "_stair_eval_cases"):
         generator = env.scene.terrain.terrain_generator
@@ -104,7 +128,7 @@ def ground_height(env, local_x):
     return env._stair_eval_levels.gather(1, index[:, None]).squeeze(1)
 
 
-def reset_stair_root(env, env_ids):
+def reset_stair_root(env, env_ids, centered_start=False):
     """Per-lane reset seeds do not depend on when other policies/lanes terminate."""
     _case_tensors(env)
     if env_ids is None:
@@ -116,7 +140,7 @@ def reset_stair_root(env, env_ids):
     offsets = []
     for env_id in ids:
         rng = random.Random(env._stair_eval_cases[env_id]["case_seed"] + 65537 * env._stair_spawn_counts[env_id])
-        offsets.append([rng.uniform(-0.05, 0.05) for _ in range(3)])
+        offsets.append([0.0, 0.0, 0.0] if centered_start else [rng.uniform(-0.05, 0.05) for _ in range(3)])
         env._stair_spawn_counts[env_id] += 1
     offsets = torch.tensor(offsets, dtype=torch.float32, device=env.device).reshape(-1, 3)
     env._stair_spawn_offsets[env_ids] = offsets
@@ -225,6 +249,8 @@ class StairSuccess(ManagerTermBase):
             "clearance": clearance,
             "gravity_z": gravity_z.clone(),
             "velocity": robot.data.root_lin_vel_b.clone(),
+            "velocity_w": robot.data.root_lin_vel_w.clone(),
+            "heading_w": robot.data.heading_w.clone(),
             "joint_velocity_rms_rad_s": robot.data.joint_vel.square().mean(dim=-1).sqrt(),
             "applied_torque_rms_nm": robot.data.applied_torque.square().mean(dim=-1).sqrt(),
             "yaw_rate": robot.data.root_ang_vel_b[:, 2].clone(),
@@ -236,7 +262,8 @@ class StairSuccess(ManagerTermBase):
         return self.hold_steps >= math.ceil(hold_s / env.step_dt)
 
 
-def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, hold_s):
+def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, hold_s,
+                               command_mode="goal", centered_start=False):
     """Change terrain, resets and goals only; preserve trained sensors and action scales."""
     env_cfg = copy.deepcopy(env_cfg)
     env_cfg.seed = seed
@@ -257,7 +284,11 @@ def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, ho
     )
     env_cfg.curriculum.terrain_levels = None
     command = env_cfg.commands.base_velocity
-    command.class_type = StairGoalCommand
+    if command_mode not in ("goal", "straight"):
+        raise ValueError("Unknown evaluation command mode: " + command_mode)
+    if command_mode == "straight" and any(case["direction"] != "flat" for case in cases):
+        raise ValueError("Straight command control is only supported for flat evaluation")
+    command.class_type = StraightWalkCommand if command_mode == "straight" else StairGoalCommand
     command.velocity_ranges = None
     command.random_velocity_terrain = None
     command.rel_standing_envs = 0.0
@@ -268,7 +299,7 @@ def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, ho
     command.target_dis_threshold = 0.25
     command.debug_vis = False
     env_cfg.events.reset_base.func = reset_stair_root
-    env_cfg.events.reset_base.params = {}
+    env_cfg.events.reset_base.params = {"centered_start": centered_start}
     env_cfg.events.reset_robot_joints.params = {
         "position_range": (0.0, 0.0), "velocity_range": (0.0, 0.0)
     }

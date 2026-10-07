@@ -1,6 +1,9 @@
 """Print saved Parkour settings and relevant TensorBoard metrics without Isaac Sim."""
 
 import argparse
+import csv
+import json
+import math
 import sys
 import types
 from pathlib import Path
@@ -13,6 +16,7 @@ METRIC_NAMES = (
     "dont_wait", "feet_air_time", "is_alive", "mean_noise_std", "mean_episode_length",
     "route_progress", "terrain_level", "action_rate", "freeze_upper_body",
     "stair_goal",
+    "tracking_exp_vel_yaw", "error_vel_yaw", "heading_error", "feet_slide", "discriminator",
 )
 
 
@@ -63,6 +67,81 @@ def saved_reward_settings(run_dir):
     return result
 
 
+def saved_training_setup(run_dir):
+    """Read what was actually saved, without inferring settings from run names."""
+    run_dir = Path(run_dir)
+    env_path, agent_path = run_dir / "params/env.yaml", run_dir / "params/agent.yaml"
+    env = load_training_yaml(env_path) if env_path.is_file() else {}
+    agent = load_training_yaml(agent_path) if agent_path.is_file() else {}
+    count = (env.get("scene", {}) or {}).get("num_envs")
+    steps = agent.get("num_steps_per_env")
+    algorithm = agent.get("algorithm", {}) or {}
+    minibatches = algorithm.get("num_mini_batches")
+    rollout = count * steps if type(count) is int and type(steps) is int else None
+    inventory_path = run_dir / "params/motion_inventory.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8")) if inventory_path.is_file() else {}
+    from prepare_parkour_references import FILES
+
+    motions = inventory.get("motions", [])
+    author_hash = FILES["parkour_motion_without_run_retargetted.npz"][1]
+    reference = (env.get("scene", {}).get("motion_reference", {}) or {}).get("motion_buffers", {}).get("run_walk", {}) or {}
+    return {
+        "num_envs": count, "steps_per_env": steps, "transitions_per_iteration": rollout,
+        "transitions_per_minibatch": rollout // minibatches if rollout and type(minibatches) is int and minibatches > 0 else None,
+        "configured_max_iterations": agent.get("max_iterations"), "resume": agent.get("resume"),
+        "algorithm": algorithm.get("class_name"), "AMP_coef": algorithm.get("discriminator_reward_coef"),
+        "motion_root": inventory.get("root", reference.get("path")),
+        "selection": inventory.get("selection", reference.get("filtered_motion_selection_filepath")),
+        "motion_files": inventory.get("files"), "motion_frames": inventory.get("frames"),
+        "author_motion_hash_matches": len(motions) == 1 and motions[0].get("sha256") == author_hash,
+    }
+
+
+def read_evaluation_metrics(eval_dir):
+    """Summarize completed or interrupted traces, per lane and episode.
+
+    Body-frame speed error and world-frame path drift are distinct quantities.
+    Ignore the first second and near-zero forward commands for speed averages.
+    Older traces have no absolute heading; do not infer it from yaw rate.
+    """
+    groups = {}
+    path = Path(eval_dir) / "trace.csv"
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        for row in csv.DictReader(stream):
+            key = (int(row["env_id"]), int(row["episode_index"]))
+            fields = ("elapsed_s", "base_x_m", "base_y_m", "vel_x_m_s", "vel_y_m_s",
+                      "command_x_m_s", "command_y_m_s", "command_yaw_rad_s")
+            values = {name: float(row[name]) for name in fields}
+            if not all(math.isfinite(value) for value in values.values()):
+                continue
+            heading = row.get("heading_w_rad")
+            values["heading"] = float(heading) if heading else None
+            groups.setdefault(key, []).append(values)
+    result = []
+    for (env_id, episode), rows in sorted(groups.items()):
+        first, last = rows[0], rows[-1]
+        dx, dy = last["base_x_m"] - first["base_x_m"], last["base_y_m"] - first["base_y_m"]
+        moving = [r for r in rows if r["elapsed_s"] >= 1.0 and r["command_x_m_s"] > .15]
+        def mean(name):
+            return sum(r[name] for r in moving) / len(moving) if moving else None
+        headings = [abs(math.atan2(math.sin(r["heading"]), math.cos(r["heading"])))
+                    for r in moving if r["heading"] is not None and math.isfinite(r["heading"])]
+        result.append({
+            "env_id": env_id, "episode": episode, "trace_duration_s": last["elapsed_s"],
+            "delta_x_m": dx, "delta_y_m": dy,
+            "net_path_angle_deg": math.degrees(math.atan2(dy, dx)) if math.hypot(dx, dy) > .05 else None,
+            "max_abs_lateral_offset_m": max(abs(r["base_y_m"]) for r in rows),
+            "moving_samples": len(moving), "mean_command_x_m_s": mean("command_x_m_s"),
+            "mean_forward_speed_body_m_s": mean("vel_x_m_s"),
+            "mean_lateral_speed_body_m_s": mean("vel_y_m_s"),
+            "mean_velocity_error_body_m_s": sum(math.hypot(r["vel_x_m_s"] - r["command_x_m_s"],
+                                                          r["vel_y_m_s"] - r["command_y_m_s"]) for r in moving) / len(moving) if moving else None,
+            "mean_abs_command_yaw_rad_s": sum(abs(r["command_yaw_rad_s"]) for r in moving) / len(moving) if moving else None,
+            "mean_abs_heading_world_deg": math.degrees(sum(headings) / len(headings)) if headings else None,
+        })
+    return result
+
+
 def inspect_checkpoint(path):
     import torch
 
@@ -81,6 +160,7 @@ def main():
     parser.add_argument("--checkpoint", help="Optional exact filename; also selects metrics up to its saved iteration")
     parser.add_argument("--samples", type=int, default=3, help="Recent values to show for each relevant metric")
     parser.add_argument("--at_iteration", type=int, help="Override the metric iteration cutoff")
+    parser.add_argument("--eval_dir", type=Path, help="Also summarize this evaluation's trace.csv (no Isaac Sim required)")
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be positive")
@@ -90,6 +170,10 @@ def main():
     if not run_dir.is_dir():
         parser.error(f"Training run directory does not exist: {run_dir}")
     print(f"[RUN] {run_dir}")
+    print("[TRAINING_SETUP] " + json.dumps(saved_training_setup(run_dir), ensure_ascii=False))
+    if args.eval_dir:
+        for row in read_evaluation_metrics(args.eval_dir):
+            print("[FLAT_TRACE] " + json.dumps(row, ensure_ascii=False))
     cutoff = args.at_iteration
     if args.checkpoint:
         if Path(args.checkpoint).name != args.checkpoint or args.checkpoint in (".", ".."):

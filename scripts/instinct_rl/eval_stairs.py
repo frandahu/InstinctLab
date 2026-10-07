@@ -46,6 +46,10 @@ def build_parser():
     parser.add_argument("--dimension_variation", type=float, default=0.25, help="Maximum relative deviation from nominal dimensions, clipped to requested ranges")
     parser.add_argument("--landing_depth", type=float, default=1.20, help="Top platform depth between ascent and descent, m")
     parser.add_argument("--speed", type=float, default=0.5, help="Forward velocity limit, m/s")
+    parser.add_argument("--command_mode", choices=("goal", "straight"), default="goal",
+                        help="Goal navigation (default), or flat-only fixed world +X heading control")
+    parser.add_argument("--centered_start", action="store_true",
+                        help="Remove the small seeded XY/yaw spawn offsets for a controlled start")
     parser.add_argument(
         "--sample", action="store_true",
         help="Diagnostic only: sample policy actions instead of using their deterministic mean",
@@ -93,6 +97,8 @@ def parse_args():
     parser.set_defaults(headless=True)
     args = parser.parse_args()
     args.numpy_runtime = numpy_runtime
+    if args.command_mode == "straight" and args.terrain_mode != "flat":
+        parser.error("--command_mode straight requires --terrain_mode flat")
     if args.task not in (
         "Instinct-Parkour-Target-Amp-G1-v0", "Instinct-Parkour-Stairs-Amp-G1-v1",
         "Instinct-Parkour-Mixed-Amp-G1-v0",
@@ -235,7 +241,7 @@ TRACE_COLUMNS = [
     "command_x_m_s", "command_y_m_s", "command_yaw_rad_s", "goal_distance_m",
     "left_ankle_x_m", "left_ankle_y_m", "left_ankle_z_m", "right_ankle_x_m", "right_ankle_y_m",
     "right_ankle_z_m", "left_contact_force_n", "right_contact_force_n", "summit_reached", "done", "termination_reasons",
-] + DIAGNOSTIC_COLUMNS
+] + ["heading_w_rad", "vel_x_world_m_s", "vel_y_world_m_s"] + DIAGNOSTIC_COLUMNS
 EPISODE_COLUMNS = [
     "env_id", "episode_index", "direction", "case_seed", "outcome", "elapsed_s", "steps",
     "max_progress_fraction", "max_abs_lateral_error_m", "mean_velocity_error_m_s", "termination_reasons",
@@ -291,7 +297,8 @@ def run_evaluation(args, cases, output, diagnostics):
         agent_dict = load_training_yaml(agent_path)
     diagnostics.phase("configure_stairs")
     env_cfg = configure_stair_evaluation(
-        env_cfg, cases, args.seed, args.speed, args.episode_length_s, args.success_hold_s
+        env_cfg, cases, args.seed, args.speed, args.episode_length_s, args.success_hold_s,
+        command_mode=args.command_mode, centered_start=args.centered_start,
     )
     env_cfg.sim.device = args.device
     if args.video:
@@ -406,6 +413,7 @@ def run_evaluation(args, cases, output, diagnostics):
                                 snapshot["goal_distance"][env_id],
                                 *snapshot["feet"][env_id][0], *snapshot["feet"][env_id][1],
                                 *snapshot["foot_forces"][env_id], int(snapshot["summit_reached"][env_id]), int(done), "|".join(reasons),
+                                snapshot["heading_w"][env_id], *snapshot["velocity_w"][env_id][:2],
                                 *[step_diagnostics[key][env_id] for key in DIAGNOSTIC_COLUMNS],
                             ])
                         if done:
@@ -433,7 +441,11 @@ def run_evaluation(args, cases, output, diagnostics):
                         detail = {key: values[lane] for key, values in step_diagnostics.items()}
                         print(
                             f"[DIAG] env={lane}, x={snapshot['pos'][lane][0]:.3f} m, "
+                            f"y={snapshot['pos'][lane][1]:.3f} m, "
+                            f"heading={math.degrees(snapshot['heading_w'][lane]):.1f} deg, "
+                            f"vx_body={snapshot['velocity'][lane][0]:.3f}, vy_body={snapshot['velocity'][lane][1]:.3f} m/s, "
                             f"command_x={snapshot['command'][lane][0]:.3f} m/s, "
+                            f"command_yaw={snapshot['command'][lane][2]:.3f} rad/s, "
                             f"observed_command_x=[{detail['observed_command_x_min_m_s']:.3f}, "
                             f"{detail['observed_command_x_max_m_s']:.3f}], "
                             f"action_rms={detail['policy_action_rms']:.4f}, "
@@ -465,6 +477,8 @@ def run_evaluation(args, cases, output, diagnostics):
         report = summarize(episodes, args.num_envs * args.episodes_per_env)
         report.update({"status": status, "error": error_text, "simulation_steps": total_steps})
         report["action_mode"] = "sampled" if args.sample else "deterministic_mean"
+        report["command_mode"] = args.command_mode
+        report["centered_start"] = args.centered_start
         report["video"] = {
             "enabled": args.video,
             "path": str(recorder.path) if recorder is not None else None,

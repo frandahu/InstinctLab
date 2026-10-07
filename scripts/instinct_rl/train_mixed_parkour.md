@@ -113,6 +113,47 @@ python -u scripts/instinct_rl/eval_stairs.py \
 验证读取保存的传感器与策略配置，替换独立测试地形，不加载 AMP 动作数据或训练 runner。
 平地和楼梯通过后，还需要独立测试斜坡、箱体边缘和间隙。
 
+## 平地走偏或小碎步时的对照检查
+
+`--terrain_mode flat` 只替换地形，默认仍是朝前方目标导航。初始有少量位置/朝向扰动，
+机器人偏离路径后会收到转向指令。斜向移动可能涉及朝向误差或机身侧向滑动，不能单凭视频区分。
+小步幅也不能单独证明速度跟踪失败，需要看实际前向速度、接触和步态。
+
+对同一个模型做固定世界 +X 朝向的纯平地对照，在原验证命令中增加：
+
+```bash
+--command_mode straight --centered_start --speed 0.5
+```
+
+此模式给 actor 固定前向速度、零侧向速度，并以转向指令纠正世界朝向。
+不朝终点转向、不修改机器人位姿或策略动作；仍保留训练观测噪声。
+仅允许纯平地使用。`--centered_start` 取消额外 XY/yaw 扰动，使用默认初始姿态。
+目标导航模式仍可用默认 `--command_mode goal` 做原来的楼梯测试。
+二者是不同验证条件，比较不同 checkpoint 时须固定模式与初始设置。
+
+新增 trace 字段 `heading_w_rad` 和 `vel_x_world_m_s` / `vel_y_world_m_s`；原 `vel_x_m_s` / `vel_y_m_s`
+仍是机身坐标系速度。控制台同时打印 y、朝向、机身 vx/vy 和实际转向指令。
+
+检查脚本可以直接读取训练规模、动作数据校验信息及已有视频的物理轨迹，不启动仿真：
+
+```bash
+python scripts/instinct_rl/inspect_parkour_training.py \
+  --load_run /实际/g1_parkour_mixed/运行目录 \
+  --checkpoint model_10000.pt \
+  --eval_dir outputs/stair_eval/author_walk_flat
+```
+
+`[TRAINING_SETUP]` 从保存的参数读取实际 `num_envs`，不根据目录名推断。
+32 个环境、24 步时，每次迭代只有 768 条转换、每个 minibatch 192 条；
+1024 个环境时分别为 24576 和 6144 条。相同迭代数不能视为相同采样规模。
+这不表示 32 个环境必然学不会，只表示启动检查规模不能直接当成原版训练规模。
+`author_motion_hash_matches=true` 表示记录的文件哈希匹配这次固定的作者动作数据。
+
+`[FLAT_TRACE]` 按环境、试验分别报告位移、轨迹夹角、侧向偏离和机身速度跟踪误差；
+速度均值跳过前 1 秒和近零前向指令，避免把初始化/停步混进平均值。
+旧 trace 缺少绝对朝向时该指标为 null，不从角速度猜朝向。
+上述结果能定位问题，但不意味着验证代码已经修复了策略的行走能力。
+
 ## 自选数据对照
 
 自定义动作须显式指定根目录和清单；原版加载器使用 `motion_weights`，不是 `weights`：
