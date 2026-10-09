@@ -20,6 +20,7 @@ def make_cases(
     irregular_fraction: float = 0.20,
     dimension_variation: float = 0.25,
     landing_depth: float = 1.20,
+    vary_both_dimensions: bool = False,
 ) -> list[dict]:
     """Each lane has its own seed; adding lanes preserves existing cases."""
     if num_envs < 1 or num_steps < 1:
@@ -43,6 +44,8 @@ def make_cases(
         raise ValueError("Sparse irregular stairs require at least three steps per flight")
     if irregular and height_range[0] == height_range[1] and depth_range[0] == depth_range[1]:
         raise ValueError("Irregular stairs require a nonzero height or depth range; use --regular otherwise")
+    if irregular and vary_both_dimensions and (height_range[0] == height_range[1] or depth_range[0] == depth_range[1]):
+        raise ValueError("vary_both_dimensions requires nonzero height AND depth ranges")
     anomaly_count = min(math.ceil(num_steps * irregular_fraction), (num_steps - 1) // 2) if irregular else 0
 
     def vary(rng, baseline, bounds):
@@ -70,12 +73,12 @@ def make_cases(
                 choices = (["height"] if height_can_vary else []) + (["depth"] if depth_can_vary else [])
                 if height_can_vary and depth_can_vary:
                     choices.append("both")
-                changed = rng.choice(choices)
+                changed = "both" if vary_both_dimensions else rng.choice(choices)
                 if changed in ("height", "both"):
                     heights[index] = vary(rng, nominal_height, height_range)
                 if changed in ("depth", "both"):
                     depths[index] = vary(rng, nominal_depth, depth_range)
-            elif heights[index] == nominal_height or (depth_can_vary and rng.choice((False, True))):
+            elif vary_both_dimensions or heights[index] == nominal_height or (depth_can_vary and rng.choice((False, True))):
                 depths[index] = vary(rng, nominal_depth, depth_range)
         return {
             "direction": direction,

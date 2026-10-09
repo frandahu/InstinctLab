@@ -44,8 +44,9 @@ def profile_height(case, x):
 def make_terrain_cases(num_envs, seed, terrain_mode, num_steps, height_range, depth_range,
                        width, irregular, irregular_fraction, dimension_variation, landing_depth,
                        slope_angle_range=(5.0, 20.0), ramp_length=2.0,
-                       curb_height_range=(0.08, 0.20)):
-    """A mixed route crosses stairs, a ramp pair, then a curb before the final goal.
+                       curb_height_range=(0.08, 0.20), curb_count=1, curb_depth_range=None,
+                       curb_gap_range=(1.0, 1.0), vary_both_dimensions=False):
+    """A mixed route crosses stairs, a ramp pair, then curbs before the final goal.
 
     Profiles use [x_start, x_end, z_start, z_end]. Mandatory flat checkpoints at
     each obstacle summit require supported landings rather than airborne passage.
@@ -60,9 +61,17 @@ def make_terrain_cases(num_envs, seed, terrain_mode, num_steps, height_range, de
             raise ValueError(f"{name} requires finite 0 < MIN <= MAX <= {upper}")
     if not math.isfinite(ramp_length) or ramp_length < 0.8:
         raise ValueError("ramp_length must be finite and at least 0.8 m")
+    if not isinstance(curb_count, int) or isinstance(curb_count, bool) or not 1 <= curb_count <= 20:
+        raise ValueError("curb_count must be an integer in [1, 20]")
+    curb_depth_range = (landing_depth, landing_depth) if curb_depth_range is None else curb_depth_range
+    for name, bounds, minimum in (("curb_depth_range", curb_depth_range, 0.8),
+                                  ("curb_gap_range", curb_gap_range, 0.15)):
+        if (len(bounds) != 2 or not all(math.isfinite(v) for v in bounds)
+                or not minimum <= bounds[0] <= bounds[1]):
+            raise ValueError(f"{name} requires finite {minimum} <= MIN <= MAX")
     # Reuse the existing validation and sparse irregular stair sampler.
     stairs = make_cases(num_envs, seed, "up_down", num_steps, height_range, depth_range,
-                        width, irregular, irregular_fraction, dimension_variation, landing_depth)
+                        width, irregular, irregular_fraction, dimension_variation, landing_depth, vary_both_dimensions)
     result = []
     for original in stairs:
         case = dict(original)
@@ -78,10 +87,11 @@ def make_terrain_cases(num_envs, seed, terrain_mode, num_steps, height_range, de
             profile.append([edge, edge + length, low, high])
             edge += length
 
-        def landing(height, label):
-            checkpoints.append({"start_x_m": edge, "end_x_m": edge + landing_depth,
+        def landing(height, label, depth=None):
+            depth = landing_depth if depth is None else depth
+            checkpoints.append({"start_x_m": edge, "end_x_m": edge + depth,
                                 "height_m": height, "terrain": label})
-            span(landing_depth, height, height)
+            span(depth, height, height)
 
         if terrain in ("stairs", "mixed"):
             for depth, height in zip(original["tread_depths_m"], original["surface_heights_m"]):
@@ -98,9 +108,19 @@ def make_terrain_cases(num_envs, seed, terrain_mode, num_steps, height_range, de
             span(ramp_length, rise, 0.0)
             span(1.0, 0.0, 0.0)
         curb = rng.uniform(*curb_height_range)
+        curbs = []
         if terrain in ("curb", "mixed"):
-            landing(curb, "curb")  # abrupt rise at entry, abrupt drop on exit
-            span(1.0, 0.0, 0.0)
+            for index in range(curb_count):
+                height = curb if index == 0 else rng.uniform(*curb_height_range)
+                # Fixed dimensions do not consume RNG, preserving the baseline geometry.
+                depth = (curb_depth_range[0] if curb_depth_range[0] == curb_depth_range[1]
+                         else rng.uniform(*curb_depth_range))
+                gap = (curb_gap_range[0] if curb_gap_range[0] == curb_gap_range[1]
+                       else rng.uniform(*curb_gap_range))
+                curbs.append({"start_x_m": edge, "end_x_m": edge + depth,
+                              "height_m": height, "depth_m": depth, "gap_after_m": gap})
+                landing(height, "curb", depth)  # abrupt rise at entry and drop on exit
+                span(gap, 0.0, 0.0)
         if terrain == "flat":
             span(6.0, 0.0, 0.0)
         obstacle_end = edge
@@ -116,6 +136,7 @@ def make_terrain_cases(num_envs, seed, terrain_mode, num_steps, height_range, de
             "checkpoints": checkpoints, "slope_angle_deg": angle if terrain in ("slope", "mixed") else None,
             "ramp_length_m": ramp_length if terrain in ("slope", "mixed") else None,
             "curb_height_m": curb if terrain in ("curb", "mixed") else None,
+            "curbs": curbs, "curb_count": len(curbs),
             "start_height_m": 0.0, "end_height_m": 0.0,
             "requires_summit": bool(checkpoints),
             "summit_start_x_m": summit["start_x_m"], "summit_end_x_m": summit["end_x_m"],

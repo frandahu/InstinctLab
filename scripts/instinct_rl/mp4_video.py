@@ -70,3 +70,17 @@ def first_render_frame(env):
         "Off-screen renderer returned empty/black frames after warmup. "
         "Check the Isaac Sim RTX renderer/driver startup errors; enable_cameras is already set."
     )
+
+
+def video_overview_pose(cases, lane_spacing):
+    """Frame the full X/Y extent of all lanes; independent of the actor cameras."""
+    left = min(case["lane_min_x_m"] for case in cases)
+    right = max(case["lane_max_x_m"] for case in cases)
+    center_x = (left + right) / 2
+    top = max(max(case["start_height_m"], case["end_height_m"], *case["surface_heights_m"])
+              for case in cases)
+    x_span = right - left
+    y_span = (len(cases) - 1) * lane_spacing + max(case["width_m"] for case in cases)
+    span = max(x_span, y_span, 6.0)
+    eye = (center_x - 0.35 * span, -max(8.0, y_span), top + max(6.0, 0.85 * span))
+    return eye, (center_x, 0.0, top / 2 + 0.5)

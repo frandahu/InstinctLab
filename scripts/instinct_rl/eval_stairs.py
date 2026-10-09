@@ -16,8 +16,9 @@ from pathlib import Path
 
 from stair_eval_cases import classify_episode, make_cases, make_flat_control_cases, summarize
 from terrain_eval_cases import make_terrain_cases
+from terrain_eval_presets import apply_difficulty_defaults
 from policy_diagnostics import DIAGNOSTIC_COLUMNS, policy_step_diagnostics
-from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
+from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose, video_overview_pose
 from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
 
@@ -30,6 +31,8 @@ def build_parser(defaults=None):
     parser.add_argument("--num_envs", type=int, default=8)
     parser.add_argument("--episodes_per_env", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--difficulty", choices=("baseline", "hard"), default="baseline",
+                        help="Evaluation-only preset; explicit CLI options override preset values")
     parser.add_argument("--stair_mode", choices=("up_down", "mixed", "up", "down"), default="up_down")
     parser.add_argument(
         "--terrain_mode", choices=("stairs", "flat", "slope", "curb", "mixed", "suite"), default="stairs",
@@ -39,6 +42,11 @@ def build_parser(defaults=None):
                         help="Ramp angle in degrees, for slope/mixed/suite")
     parser.add_argument("--ramp_length", type=float, default=2.0, help="Horizontal length of each ramp, m")
     parser.add_argument("--curb_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
+    parser.add_argument("--curb_count", type=int, default=1, help="Number of successive curb platforms")
+    parser.add_argument("--curb_depth_range", type=float, nargs=2, metavar=("MIN", "MAX"),
+                        help="Platform length along travel; default uses landing_depth")
+    parser.add_argument("--curb_gap_range", type=float, nargs=2, default=(1.0, 1.0), metavar=("MIN", "MAX"),
+                        help="Ground distance after each curb platform, m")
     parser.add_argument("--num_steps", type=int, default=8, help="Steps per flight (up_down has this many up AND down)")
     parser.add_argument("--step_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
     parser.add_argument("--tread_depth_range", type=float, nargs=2, default=(0.25, 0.40), metavar=("MIN", "MAX"))
@@ -47,6 +55,8 @@ def build_parser(defaults=None):
     geometry.add_argument("--irregular", action="store_true", dest="irregular", help="Sparse dimensional deviations (default)")
     geometry.add_argument("--regular", action="store_false", dest="irregular", help="All steps in a flight use nominal dimensions")
     parser.set_defaults(irregular=True)
+    parser.add_argument("--vary_both_dimensions", action="store_true",
+                        help="Change both height and tread depth at each selected irregular step")
     parser.add_argument("--irregular_fraction", type=float, default=0.20, help="Fraction of affected steps per flight; rounded up and capped below half")
     parser.add_argument("--dimension_variation", type=float, default=0.25, help="Maximum relative deviation from nominal dimensions, clipped to requested ranges")
     parser.add_argument("--landing_depth", type=float, default=1.20, help="Top platform depth between ascent and descent, m")
@@ -72,6 +82,8 @@ def build_parser(defaults=None):
     parser.add_argument("--video_length", type=int, help="Optional recording limit in simulation steps; default records the full evaluation")
     parser.add_argument("--video_stride", type=int, default=2, help="Record every N simulation steps; default is 25 FPS at step_dt=0.02 s")
     parser.add_argument("--video_env_id", type=int, default=0, help="Lane shown in the fixed spectator camera")
+    parser.add_argument("--video_view", choices=("lane", "overview"), default="lane",
+                        help="Show one lane or all parallel robots in one MP4")
     parser.add_argument("--video_width", type=int, default=1280)
     parser.add_argument("--video_height", type=int, default=720)
     parser.add_argument("--dry_run", action="store_true", help="Write cases.json only; no Isaac Sim or checkpoint required")
@@ -82,6 +94,7 @@ def build_parser(defaults=None):
 
 def parse_args(defaults=None):
     parser = build_parser(defaults)
+    apply_difficulty_defaults(parser)
     numpy_runtime = None
     if "--dry_run" in sys.argv or "--help" in sys.argv or "-h" in sys.argv:
         # Permit a CPU-only preview on a machine without Isaac Lab.
@@ -139,12 +152,14 @@ def parse_args(defaults=None):
                 tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
                 args.irregular_fraction, args.dimension_variation, args.landing_depth,
                 tuple(args.slope_angle_range), args.ramp_length, tuple(args.curb_height_range),
+                args.curb_count, args.curb_depth_range, tuple(args.curb_gap_range), args.vary_both_dimensions,
             )
         else:
             cases = make_cases(
                 args.num_envs, args.seed, args.stair_mode, args.num_steps,
                 tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
                 args.irregular_fraction, args.dimension_variation, args.landing_depth,
+                args.vary_both_dimensions,
             )
     except ValueError as error:
         parser.error(str(error))
@@ -324,7 +339,10 @@ def run_evaluation(args, cases, output, diagnostics):
         selected = cases[args.video_env_id]
         lane_y = (args.video_env_id - (args.num_envs - 1) / 2) * env_cfg.scene.terrain.terrain_generator.size[1]
         env_cfg.viewer.origin_type = "world"
-        env_cfg.viewer.eye, env_cfg.viewer.lookat = video_camera_pose(selected, lane_y)
+        env_cfg.viewer.eye, env_cfg.viewer.lookat = (
+            video_overview_pose(cases, env_cfg.scene.terrain.terrain_generator.size[1])
+            if args.video_view == "overview" else video_camera_pose(selected, lane_y)
+        )
         env_cfg.viewer.resolution = (args.video_width, args.video_height)
     agent_dict["device"] = args.device
     diagnostics.phase("hash_checkpoint", str(checkpoint))
@@ -510,6 +528,7 @@ def run_evaluation(args, cases, output, diagnostics):
             "frames": recorder.frames if recorder is not None else 0,
             "fps": recorder.fps if recorder is not None else None,
             "env_id": args.video_env_id,
+            "view": args.video_view,
             "encoding_error": video_error,
         }
         report["by_direction"] = {
@@ -550,7 +569,10 @@ def main(defaults=None):
         print(f"[INFO] Output directory already exists; using a new directory: {output}", flush=True)
     print(f"[INFO] Results directory: {output}", flush=True)
     write_json(output / "cases.json", {
-        "protocol": "terrain_routes_v1" if is_course else "straight_stairs_v3", "seed": args.seed, "cases": cases,
+        "protocol": (
+            "terrain_routes_v2" if is_course and (args.curb_count > 1 or args.vary_both_dimensions)
+            else "terrain_routes_v1" if is_course else "straight_stairs_v3"
+        ), "seed": args.seed, "cases": cases,
         "output_dir": str(output),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "unknown_terrain_definition": (

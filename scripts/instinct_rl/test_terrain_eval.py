@@ -10,12 +10,25 @@ from pathlib import Path
 from unittest import mock
 
 import eval_stairs
+from mp4_video import video_overview_pose
 from terrain_eval_cases import TERRAIN_SUITE, make_terrain_cases, profile_height
+from terrain_eval_presets import HARD_DEFAULTS
 
 
 def routes(num_envs=2, mode="mixed", seed=42):
     return make_terrain_cases(num_envs, seed, mode, 4, (0.08, 0.20), (0.25, 0.40),
                               2.0, True, 0.20, 0.25, 1.2)
+
+
+def hard_routes(num_envs=8, seed=42):
+    p = HARD_DEFAULTS
+    return make_terrain_cases(
+        num_envs, seed, "mixed", p["num_steps"], p["step_height_range"], p["tread_depth_range"],
+        2.0, p["irregular"], p["irregular_fraction"], p["dimension_variation"], 1.2,
+        curb_height_range=p["curb_height_range"], curb_count=p["curb_count"],
+        curb_depth_range=p["curb_depth_range"], curb_gap_range=p["curb_gap_range"],
+        vary_both_dimensions=p["vary_both_dimensions"],
+    )
 
 
 class TerrainGeometryTests(unittest.TestCase):
@@ -83,6 +96,78 @@ class TerrainGeometryTests(unittest.TestCase):
             self.assertTrue(manifest["arguments"]["video"])
             self.assertEqual(len(manifest["cases"]), 5)
 
+    def test_hard_stairs_change_both_dimensions_and_return_to_ground(self):
+        cases = hard_routes()
+        self.assertEqual(cases, hard_routes(10)[:8])
+        self.assertNotEqual(cases, hard_routes(seed=43))
+        for case in cases:
+            for flight in case["flights"]:
+                changed = flight["anomalous_step_indices"]
+                self.assertEqual(len(changed), 3)
+                self.assertEqual(len(flight["riser_heights_m"]), 8)
+                for index, (height, depth) in enumerate(zip(flight["riser_heights_m"], flight["tread_depths_m"])):
+                    self.assertTrue(.10 <= height <= .24)
+                    self.assertTrue(.24 <= depth <= .42)
+                    self.assertEqual(height != case["nominal_riser_height_m"], index in changed)
+                    self.assertEqual(depth != case["nominal_tread_depth_m"], index in changed)
+            self.assertAlmostEqual(sum(case["riser_deltas_m"]), 0.0)
+            self.assertEqual(profile_height(case, case["goal_x_m"]), 0.0)
+
+    def test_hard_curbs_have_distinct_platforms_gaps_and_required_checkpoints(self):
+        for case in hard_routes():
+            self.assertEqual(case["curb_count"], 3)
+            self.assertEqual([p["terrain"] for p in case["checkpoints"]], ["stairs", "slope", "curb", "curb", "curb"])
+            for curb in case["curbs"]:
+                self.assertTrue(.12 <= curb["height_m"] <= .24)
+                self.assertTrue(.80 <= curb["depth_m"] <= 1.30)
+                self.assertTrue(.45 <= curb["gap_after_m"] <= .90)
+                self.assertEqual(profile_height(case, curb["start_x_m"] - 1e-6), 0.0)
+                self.assertAlmostEqual(profile_height(case, curb["end_x_m"] - 1e-6), curb["height_m"])
+                self.assertEqual(profile_height(case, curb["end_x_m"] + 1e-6), 0.0)
+            for first, second in zip(case["curbs"], case["curbs"][1:]):
+                self.assertAlmostEqual(second["start_x_m"] - first["end_x_m"], first["gap_after_m"])
+            for key in ("height_m", "depth_m", "gap_after_m"):
+                self.assertEqual(len({curb[key] for curb in case["curbs"]}), 3)
+
+    def test_invalid_repeated_curb_dimensions_are_rejected(self):
+        for kwargs in ({"curb_count": 0}, {"curb_count": 21}, {"curb_count": True},
+                       {"curb_depth_range": (.5, 1)}, {"curb_gap_range": (0, 1)},
+                       {"curb_gap_range": (.5, float("inf"))}, {"curb_depth_range": (1, .8)}):
+            with self.assertRaises(ValueError):
+                make_terrain_cases(1, 42, "mixed", 4, (.08, .2), (.25, .4), 2, True, .2, .25, 1.2, **kwargs)
+
+    def test_hard_preset_and_explicit_overrides_in_written_manifest(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            output = Path(directory) / "hard"
+            cli = ["eval_mixed_parkour.py", "--dry_run", "--difficulty", "hard", "--load_run", "example",
+                   "--checkpoint", "model_22000.pt", "--output_dir", str(output)]
+            with mock.patch("sys.argv", cli):
+                eval_stairs.main({"task": "Instinct-Parkour-Mixed-Amp-G1-v0", "terrain_mode": "mixed",
+                                  "num_envs": 4, "num_steps": 4, "episodes_per_env": 3, "episode_length_s": 60})
+            manifest = json.loads((output / "cases.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["protocol"], "terrain_routes_v2")
+            self.assertEqual(len(manifest["cases"]), 8)
+            for case in manifest["cases"]:
+                self.assertEqual(len(case["checkpoints"]), 5)
+                self.assertEqual(case["curb_count"], 3)
+                self.assertEqual(case["anomalous_steps_per_flight"], 3)
+            args = manifest["arguments"]
+            self.assertEqual((args["num_envs"], args["episode_length_s"], args["video_view"]), (8, 90, "overview"))
+            self.assertEqual((args["video_width"], args["video_height"]), (1920, 1080))
+            with mock.patch("sys.argv", cli + ["--num_envs", "2", "--num_steps", "10", "--video_view", "lane"]):
+                args, cases, _ = eval_stairs.parse_args({"terrain_mode": "mixed"})
+            self.assertEqual((len(cases), args.num_steps, args.video_view), (2, 10, "lane"))
+
+    def test_overview_camera_scales_with_parallel_lane_extent(self):
+        cases = hard_routes()
+        eye, target = video_overview_pose(cases, 4.0)
+        single_eye, _ = video_overview_pose(cases[:1], 4.0)
+        self.assertEqual(target[1], 0.0)
+        self.assertAlmostEqual(target[0], (min(c["lane_min_x_m"] for c in cases)
+                                          + max(c["lane_max_x_m"] for c in cases)) / 2)
+        self.assertGreater(eye[2], single_eye[2])
+        self.assertLess(eye[1], single_eye[1])
+
 
 class TerrainTensorTests(unittest.TestCase):
     @classmethod
@@ -143,9 +228,30 @@ class TerrainTensorTests(unittest.TestCase):
             result = term(env)
         self.assertEqual(result.tolist(), [True, True])
         self.assertEqual(term.snapshot["checkpoints_passed"].tolist(), [3, 3])
+
         term.reset([0])
         self.assertEqual(term.checkpoint_reached.sum(dim=1).tolist(), [0, 3])
         self.assertEqual(term.snapshot["checkpoints_passed"].tolist(), [3, 3])
+
+    def test_hard_goal_requires_all_five_supported_checkpoints(self):
+        env, _ = self.environment()
+        cases = hard_routes(2)
+        env.scene.terrain.terrain_generator.cases = cases
+        term = self.namespace["StairSuccess"](None, env)
+        for checkpoint_id in range(5):
+            for i, case in enumerate(cases):
+                point = case["checkpoints"][checkpoint_id]
+                self.move(env, i, (point["start_x_m"] + point["end_x_m"]) / 2, point["height_m"])
+            term(env)
+            for i, case in enumerate(cases):
+                self.move(env, i, case["goal_x_m"], 0.0)
+            for _ in range(30):
+                result = term(env)
+            self.assertEqual(result.tolist(), [checkpoint_id == 4, checkpoint_id == 4])
+        self.assertEqual(term.snapshot["checkpoints_passed"].tolist(), [5, 5])
+        term.reset([0])
+        self.assertEqual(term.checkpoint_reached.sum(dim=1).tolist(), [0, 5])
+        self.assertEqual(term.snapshot["checkpoints_passed"].tolist(), [5, 5])
 
 
 if __name__ == "__main__":
