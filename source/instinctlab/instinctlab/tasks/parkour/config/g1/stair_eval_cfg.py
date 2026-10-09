@@ -35,6 +35,11 @@ class StaircaseGenerator:
             lane_y = (case["env_id"] - (len(self.cases) - 1) / 2) * cfg.size[1]
             origins.append([0.0, lane_y, case["start_height_m"]])
             targets.append([case["goal_x_m"], lane_y, case["end_height_m"]])
+            if "profile" in case:
+                vertices = np.asarray(case["mesh_vertices"], dtype=np.float64).copy()
+                vertices[:, 1] += lane_y
+                meshes.append(trimesh.Trimesh(vertices=vertices, faces=case["mesh_faces"], process=False))
+                continue
             edge = case["stair_start_x_m"]
             spans = [(case["lane_min_x_m"], edge, case["start_height_m"])]
             for depth, height in zip(case["tread_depths_m"], case["surface_heights_m"]):
@@ -112,20 +117,45 @@ def _case_tensors(env):
         env._stair_requires_summit = torch.tensor(
             [case["requires_summit"] for case in cases], dtype=torch.bool, device=env.device
         )
-        edges = [[case["stair_start_x_m"]] for case in cases]
-        levels = [[case["start_height_m"], *case["surface_heights_m"]] for case in cases]
-        for row, case in zip(edges, cases):
-            for depth in case["tread_depths_m"][:-1]:
-                row.append(row[-1] + depth)
+        edges, levels, slopes, starts = [], [], [], []
+        for case in cases:
+            if "profile" in case:
+                profile = case["profile"]
+                edges.append([segment[1] for segment in profile])
+                levels.append([segment[2] for segment in profile] + [case["end_height_m"]])
+                slopes.append([(high - low) / (right - left) for left, right, low, high in profile] + [0.0])
+                starts.append([segment[0] for segment in profile] + [profile[-1][1]])
+            else:
+                row = [case["stair_start_x_m"]]
+                for depth in case["tread_depths_m"][:-1]:
+                    row.append(row[-1] + depth)
+                edges.append(row)
+                levels.append([case["start_height_m"], *case["surface_heights_m"]])
+                slopes.append([0.0] * len(levels[-1]))
+                starts.append([0.0] * len(levels[-1]))
+        # Suite lanes have different segment counts. Infinity keeps padding inactive.
+        count = max(map(len, edges))
+        for row, level, slope, start in zip(edges, levels, slopes, starts):
+            missing = count - len(row)
+            row.extend([float("inf")] * missing)
+            level.extend([level[-1]] * missing)
+            slope.extend([0.0] * missing)
+            start.extend([0.0] * missing)
         env._stair_eval_edges = torch.tensor(edges, dtype=torch.float32, device=env.device)
         env._stair_eval_levels = torch.tensor(levels, dtype=torch.float32, device=env.device)
+        env._stair_eval_slopes = torch.tensor(slopes, dtype=torch.float32, device=env.device)
+        env._stair_eval_starts = torch.tensor(starts, dtype=torch.float32, device=env.device)
     return env._stair_eval_bounds
 
 
 def ground_height(env, local_x):
     _case_tensors(env)
     index = (local_x[:, None] >= env._stair_eval_edges).sum(dim=-1)
-    return env._stair_eval_levels.gather(1, index[:, None]).squeeze(1)
+    index = index[:, None]
+    level = env._stair_eval_levels.gather(1, index).squeeze(1)
+    slope = env._stair_eval_slopes.gather(1, index).squeeze(1)
+    start = env._stair_eval_starts.gather(1, index).squeeze(1)
+    return level + slope * (local_x - start).clamp(min=0.0)
 
 
 def reset_stair_root(env, env_ids, centered_start=False):
@@ -189,6 +219,21 @@ class StairSuccess(ManagerTermBase):
         self.hold_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
         self.summit_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self.snapshot = None
+        _case_tensors(env)
+        checkpoints = [case.get("checkpoints", []) for case in env._stair_eval_cases]
+        count = max((len(row) for row in checkpoints), default=0)
+        self.checkpoint_valid = torch.tensor(
+            [[True] * len(row) + [False] * (count - len(row)) for row in checkpoints],
+            dtype=torch.bool, device=env.device,
+        ).reshape(env.num_envs, count)
+        self.checkpoint_reached = torch.zeros_like(self.checkpoint_valid)
+        self.checkpoint_bounds = {
+            key: torch.tensor(
+                [[point[key] for point in row] + [0.0] * (count - len(row)) for row in checkpoints],
+                dtype=torch.float32, device=env.device,
+            ).reshape(env.num_envs, count)
+            for key in ("start_x_m", "end_x_m", "height_m")
+        }
         self.foot_ids, _ = env.scene["robot"].find_bodies(
             ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
         )
@@ -202,6 +247,7 @@ class StairSuccess(ManagerTermBase):
         ids = slice(None) if env_ids is None else env_ids
         self.hold_steps[ids] = 0
         self.summit_reached[ids] = False
+        self.checkpoint_reached[ids] = False
         # Keep snapshot intact: the caller reads it after env.step has auto-reset.
 
     def __call__(self, env, hold_s=0.5, goal_radius=0.35):
@@ -226,6 +272,17 @@ class StairSuccess(ManagerTermBase):
         ).all(dim=-1)
         on_summit &= (pos[:, 0] > bounds["summit_start_x_m"]) & (pos[:, 0] < bounds["summit_end_x_m"])
         self.summit_reached |= env._stair_requires_summit & on_summit & supported_upright
+        # Each obstacle in a combined route requires a supported summit landing.
+        points = self.checkpoint_bounds
+        on_checkpoint = (
+            (feet[:, :, 0, None] > points["start_x_m"][:, None, :] + 0.05)
+            & (feet[:, :, 0, None] < points["end_x_m"][:, None, :] - 0.05)
+            & (feet[:, :, 1, None].abs() < bounds["width_m"][:, None, None] / 2 - 0.1)
+            & ((feet[:, :, 2, None] - points["height_m"][:, None, :]).abs() < 0.20)
+        ).all(dim=1)
+        on_checkpoint &= (pos[:, 0, None] > points["start_x_m"]) & (pos[:, 0, None] < points["end_x_m"])
+        self.checkpoint_reached |= on_checkpoint & supported_upright[:, None] & self.checkpoint_valid
+        route_passed = (self.checkpoint_reached | ~self.checkpoint_valid).all(dim=1)
         distance = torch.sqrt((pos[:, 0] - bounds["goal_x_m"]) ** 2 + pos[:, 1] ** 2)
         on_landing = (feet[:, :, 0] > bounds["stair_end_x_m"][:, None] + 0.1).all(dim=-1)
         on_landing &= (feet[:, :, 1].abs() < bounds["width_m"][:, None] / 2 - 0.1).all(dim=-1)
@@ -238,6 +295,7 @@ class StairSuccess(ManagerTermBase):
             & feet_near_floor
             & supported_upright
             & (~env._stair_requires_summit | self.summit_reached)
+            & route_passed
         )
         self.hold_steps[:] = torch.where(eligible, self.hold_steps + 1, 0)
         self.snapshot = {
@@ -258,6 +316,8 @@ class StairSuccess(ManagerTermBase):
             "goal_distance": distance,
             "spawn_offsets": env._stair_spawn_offsets.clone(),
             "summit_reached": self.summit_reached.clone(),
+            "checkpoints_passed": self.checkpoint_reached.sum(dim=1),
+            "checkpoints_required": self.checkpoint_valid.sum(dim=1),
         }
         return self.hold_steps >= math.ceil(hold_s / env.step_dt)
 

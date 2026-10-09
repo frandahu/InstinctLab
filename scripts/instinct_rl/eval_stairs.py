@@ -15,13 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from stair_eval_cases import classify_episode, make_cases, make_flat_control_cases, summarize
+from terrain_eval_cases import make_terrain_cases
 from policy_diagnostics import DIAGNOSTIC_COLUMNS, policy_step_diagnostics
 from mp4_video import Mp4Recorder, first_render_frame, video_camera_pose
 from eval_startup import StartupDiagnostics
 from training_yaml import load_training_yaml, restore_training_env_config
 
 
-def build_parser():
+def build_parser(defaults=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default="Instinct-Parkour-Target-Amp-G1-v0")
     parser.add_argument("--load_run", required=True, help="Run directory, absolute or relative to logs/instinct_rl/g1_parkour")
@@ -31,9 +32,13 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stair_mode", choices=("up_down", "mixed", "up", "down"), default="up_down")
     parser.add_argument(
-        "--terrain_mode", choices=("stairs", "flat"), default="stairs",
-        help="Use stairs (default) or flatten the same route for a locomotion control",
+        "--terrain_mode", choices=("stairs", "flat", "slope", "curb", "mixed", "suite"), default="stairs",
+        help="Stairs, flat control, slope, curb, continuous mixed route, or five-terrain suite",
     )
+    parser.add_argument("--slope_angle_range", type=float, nargs=2, default=(5.0, 20.0), metavar=("MIN", "MAX"),
+                        help="Ramp angle in degrees, for slope/mixed/suite")
+    parser.add_argument("--ramp_length", type=float, default=2.0, help="Horizontal length of each ramp, m")
+    parser.add_argument("--curb_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
     parser.add_argument("--num_steps", type=int, default=8, help="Steps per flight (up_down has this many up AND down)")
     parser.add_argument("--step_height_range", type=float, nargs=2, default=(0.08, 0.20), metavar=("MIN", "MAX"))
     parser.add_argument("--tread_depth_range", type=float, nargs=2, default=(0.25, 0.40), metavar=("MIN", "MAX"))
@@ -70,11 +75,13 @@ def build_parser():
     parser.add_argument("--video_width", type=int, default=1280)
     parser.add_argument("--video_height", type=int, default=720)
     parser.add_argument("--dry_run", action="store_true", help="Write cases.json only; no Isaac Sim or checkpoint required")
+    if defaults:
+        parser.set_defaults(**defaults)
     return parser
 
 
-def parse_args():
-    parser = build_parser()
+def parse_args(defaults=None):
+    parser = build_parser(defaults)
     numpy_runtime = None
     if "--dry_run" in sys.argv or "--help" in sys.argv or "-h" in sys.argv:
         # Permit a CPU-only preview on a machine without Isaac Lab.
@@ -99,6 +106,8 @@ def parse_args():
     args.numpy_runtime = numpy_runtime
     if args.command_mode == "straight" and args.terrain_mode != "flat":
         parser.error("--command_mode straight requires --terrain_mode flat")
+    if args.terrain_mode in ("slope", "curb", "mixed", "suite") and args.stair_mode != "up_down":
+        parser.error("slope/curb/mixed/suite use complete up-and-down obstacles; omit --stair_mode")
     if args.task not in (
         "Instinct-Parkour-Target-Amp-G1-v0", "Instinct-Parkour-Stairs-Amp-G1-v1",
         "Instinct-Parkour-Mixed-Amp-G1-v0",
@@ -124,11 +133,19 @@ def parse_args():
     if Path(args.checkpoint).name != args.checkpoint or args.checkpoint in (".", ".."):
         parser.error("--checkpoint must be an exact filename inside --load_run")
     try:
-        cases = make_cases(
-            args.num_envs, args.seed, args.stair_mode, args.num_steps,
-            tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
-            args.irregular_fraction, args.dimension_variation, args.landing_depth,
-        )
+        if args.terrain_mode in ("slope", "curb", "mixed", "suite"):
+            cases = make_terrain_cases(
+                args.num_envs, args.seed, args.terrain_mode, args.num_steps,
+                tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
+                args.irregular_fraction, args.dimension_variation, args.landing_depth,
+                tuple(args.slope_angle_range), args.ramp_length, tuple(args.curb_height_range),
+            )
+        else:
+            cases = make_cases(
+                args.num_envs, args.seed, args.stair_mode, args.num_steps,
+                tuple(args.step_height_range), tuple(args.tread_depth_range), args.stair_width, args.irregular,
+                args.irregular_fraction, args.dimension_variation, args.landing_depth,
+            )
     except ValueError as error:
         parser.error(str(error))
     if args.terrain_mode == "flat":
@@ -242,10 +259,12 @@ TRACE_COLUMNS = [
     "left_ankle_x_m", "left_ankle_y_m", "left_ankle_z_m", "right_ankle_x_m", "right_ankle_y_m",
     "right_ankle_z_m", "left_contact_force_n", "right_contact_force_n", "summit_reached", "done", "termination_reasons",
 ] + ["heading_w_rad", "vel_x_world_m_s", "vel_y_world_m_s"] + DIAGNOSTIC_COLUMNS
+TRACE_COLUMNS += ["terrain", "checkpoints_passed", "checkpoints_required"]
 EPISODE_COLUMNS = [
     "env_id", "episode_index", "direction", "case_seed", "outcome", "elapsed_s", "steps",
     "max_progress_fraction", "max_abs_lateral_error_m", "mean_velocity_error_m_s", "termination_reasons",
     "spawn_x_offset_m", "spawn_y_offset_m", "spawn_yaw_offset_rad", "summit_reached",
+    "terrain", "checkpoints_passed", "checkpoints_required",
 ]
 
 
@@ -291,7 +310,7 @@ def run_evaluation(args, cases, output, diagnostics):
         )
         print(
             f"[INFO] Restored saved environment: initialized {len(config_restore['initialized_optional_fields'])} "
-            "optional fields; training terrain generator will be replaced by evaluation stairs.", flush=True
+            "optional fields; training terrain generator will be replaced by evaluation routes.", flush=True
         )
         diagnostics.phase("load_saved_agent", str(agent_path))
         agent_dict = load_training_yaml(agent_path)
@@ -348,7 +367,8 @@ def run_evaluation(args, cases, output, diagnostics):
         success_term = base.termination_manager.get_term_cfg("stair_success").func
         if args.video:
             diagnostics.phase("initialize_mp4_encoder")
-            recorder = Mp4Recorder(output / "staircase.mp4", fps=1.0 / (base.step_dt * args.video_stride))
+            video_name = "terrain_walk.mp4" if any("profile" in case for case in cases) else "staircase.mp4"
+            recorder = Mp4Recorder(output / video_name, fps=1.0 / (base.step_dt * args.video_stride))
             diagnostics.phase("render_first_frame")
             recorder.append(first_render_frame(base))
             print(f"[INFO] Off-screen MP4: {recorder.path}, lane={args.video_env_id}, fps={recorder.fps:g}", flush=True)
@@ -415,6 +435,8 @@ def run_evaluation(args, cases, output, diagnostics):
                                 *snapshot["foot_forces"][env_id], int(snapshot["summit_reached"][env_id]), int(done), "|".join(reasons),
                                 snapshot["heading_w"][env_id], *snapshot["velocity_w"][env_id][:2],
                                 *[step_diagnostics[key][env_id] for key in DIAGNOSTIC_COLUMNS],
+                                case.get("terrain", "flat" if case["direction"] == "flat" else "stairs"),
+                                snapshot["checkpoints_passed"][env_id], snapshot["checkpoints_required"][env_id],
                             ])
                         if done:
                             episode = {
@@ -429,6 +451,9 @@ def run_evaluation(args, cases, output, diagnostics):
                                 "spawn_y_offset_m": snapshot["spawn_offsets"][env_id][1],
                                 "spawn_yaw_offset_rad": snapshot["spawn_offsets"][env_id][2],
                                 "summit_reached": snapshot["summit_reached"][env_id],
+                                "terrain": case.get("terrain", "flat" if case["direction"] == "flat" else "stairs"),
+                                "checkpoints_passed": snapshot["checkpoints_passed"][env_id],
+                                "checkpoints_required": snapshot["checkpoints_required"][env_id],
                             }
                             episodes.append(episode)
                             episode_writer.writerow(episode)
@@ -494,6 +519,15 @@ def run_evaluation(args, cases, output, diagnostics):
             )
             for direction in ("up_down", "up", "down", "flat") if any(case["direction"] == direction for case in cases)
         }
+        report["by_terrain"] = {
+            terrain: summarize(
+                [row for row in episodes if row["terrain"] == terrain],
+                sum(case.get("terrain", "flat" if case["direction"] == "flat" else "stairs") == terrain
+                    for case in cases) * args.episodes_per_env,
+            )
+            for terrain in sorted({case.get("terrain", "flat" if case["direction"] == "flat" else "stairs")
+                                   for case in cases})
+        }
         write_json(output / "summary.json", report)
         print(f"[RESULT] status={status}, outcomes={report['outcome_counts']}, summary={output / 'summary.json'}")
         env.close()
@@ -501,23 +535,27 @@ def run_evaluation(args, cases, output, diagnostics):
             raise RuntimeError(f"MP4 finalization failed: {video_error}")
 
 
-def main():
+def main(defaults=None):
     global simulation_app
-    args, cases, launcher_class = parse_args()
+    args, cases, launcher_class = parse_args() if defaults is None else parse_args(defaults)
     # The parser helper in this repository expects the standard runner flags.
     args.resume, args.run_name = True, None
+    is_course = any("profile" in case for case in cases)
     requested_output = (
-        args.output_dir or Path("outputs/stair_eval") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        args.output_dir or Path("outputs/terrain_eval" if is_course else "outputs/stair_eval")
+        / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     ).expanduser().resolve()
     output = create_output_directory(requested_output)
     if output != requested_output:
         print(f"[INFO] Output directory already exists; using a new directory: {output}", flush=True)
     print(f"[INFO] Results directory: {output}", flush=True)
     write_json(output / "cases.json", {
-        "protocol": "straight_stairs_v3", "seed": args.seed, "cases": cases,
+        "protocol": "terrain_routes_v1" if is_course else "straight_stairs_v3", "seed": args.seed, "cases": cases,
         "output_dir": str(output),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "unknown_terrain_definition": (
+            "Seeded straight routes of stairs, ramps and curbs; training-range disjointness is not claimed."
+            if is_course else
             "Flat locomotion control with the same route length and goals."
             if getattr(args, "terrain_mode", "stairs") == "flat" else
             "Novel stair routes with sparse dimensional deviations; training-range disjointness is not claimed."
