@@ -10,6 +10,16 @@ from . import agents
 task_entry = "instinctlab.tasks.parkour.config.g1"
 
 gym.register(
+    id="Instinct-Parkour-Curb-Crossing-Amp-G1-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.curb_crossing_cfg:G1CurbCrossingEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.curb_crossing_rl_cfg:G1CurbCrossingPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Instinct-Parkour-Mixed-Amp-G1-v0",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,

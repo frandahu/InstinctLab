@@ -35,8 +35,9 @@ parser.add_argument(
     "--logroot", type=str, default=None, help="Override default log root path, typically `log/instinct_rl/`."
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--motion_root", help="Motion dataset root for the Mixed Parkour task.")
-parser.add_argument("--motion_selection", help="Curated G1 motion YAML for the Mixed Parkour task.")
+parser.add_argument("--motion_root", help="Motion dataset root for Mixed Parkour or Curb Crossing.")
+parser.add_argument("--motion_selection", help="Curated G1 motion YAML for Mixed Parkour or Curb Crossing.")
+parser.add_argument("--warm_start", help="Curb crossing only: initialize policy/value weights, with fresh AMP and optimizers.")
 parser.add_argument(
     "--distributed",
     action="store_true",
@@ -56,8 +57,11 @@ cli_args.add_instinct_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
-if (args_cli.motion_root or args_cli.motion_selection) and args_cli.task != "Instinct-Parkour-Mixed-Amp-G1-v0":
-    parser.error("--motion_root/--motion_selection are supported by Instinct-Parkour-Mixed-Amp-G1-v0")
+motion_tasks = ("Instinct-Parkour-Mixed-Amp-G1-v0", "Instinct-Parkour-Curb-Crossing-Amp-G1-v0")
+if (args_cli.motion_root or args_cli.motion_selection) and args_cli.task not in motion_tasks:
+    parser.error("--motion_root/--motion_selection require a Mixed Parkour or Curb Crossing task")
+if args_cli.warm_start and (args_cli.task != motion_tasks[1] or args_cli.resume):
+    parser.error("--warm_start requires Curb Crossing and cannot be combined with --resume")
 if "LOCAL_RANK" in os.environ:
     args_cli.distributed = True
 
@@ -143,6 +147,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     motion_inventory = None
+    if args_cli.task == "Instinct-Parkour-Curb-Crossing-Amp-G1-v0":
+        from prepare_curb_crossing_motions import configure_curb_motions
+
+        if args_cli.warm_start and agent_cfg.resume:
+            raise ValueError("--warm_start cannot be combined with agent.resume=True")
+        motion_inventory = configure_curb_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
+        print(
+            f"[CURB] references={motion_inventory['files']}, selection={motion_inventory['selection']}, "
+            f"AMP coef={agent_cfg.algorithm.discriminator_reward_coef}, warm_start={args_cli.warm_start}",
+            flush=True,
+        )
     if args_cli.task == "Instinct-Parkour-Mixed-Amp-G1-v0":
         from check_parkour_motions import configure_training_motions
 
@@ -185,6 +200,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     # specify directory for logging experiments
+    if args_cli.task == "Instinct-Parkour-Curb-Crossing-Amp-G1-v0":
+        env_cfg.scene.terrain.terrain_generator.seed = env_cfg.seed
     if args_cli.logroot is None:
         log_root_path = os.path.join("logs", "instinct_rl", agent_cfg.experiment_name)
         log_root_path = os.path.abspath(log_root_path)
@@ -241,7 +258,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from instinct-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    if args_cli.task in ("Instinct-Parkour-Stairs-Amp-G1-v1", "Instinct-Parkour-Mixed-Amp-G1-v0") and not (
+    if args_cli.task in ("Instinct-Parkour-Stairs-Amp-G1-v1", *motion_tasks) and not (
         "LOCAL_RANK" in os.environ and dist.get_rank() > 0
     ):
         from stair_training_runtime import save_runtime_sources
@@ -259,6 +276,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+    elif args_cli.warm_start:
+        from curb_crossing_warm_start import warm_start
+
+        initialization = warm_start(runner, args_cli.warm_start, agent_cfg)
+        if not ("LOCAL_RANK" in os.environ and dist.get_rank() > 0):
+            os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
+            with open(os.path.join(log_dir, "params", "warm_start.json"), "w", encoding="utf-8") as stream:
+                json.dump(initialization, stream, indent=2)
+        print(f"[CURB] warm-start: {initialization}", flush=True)
 
     # dump the configuration into log-directory
     if not ("LOCAL_RANK" in os.environ and dist.get_rank() > 0):

@@ -376,6 +376,14 @@ def configure_stair_evaluation(env_cfg, cases, seed, speed, episode_length_s, ho
     env_cfg.terminations.dataset_exhausted = None
     # Training completion uses the training grid; evaluation has held-out lanes.
     env_cfg.terminations.stair_goal = None
+    # Curb training state assumes a curriculum grid. Frozen evaluation uses its
+    # own lanes and passive touchdown diagnostics, so remove training-only terms.
+    env_cfg.terminations.curb_goal = None
+    if hasattr(env_cfg.events, "curb_crossing_reset"):
+        env_cfg.events.curb_crossing_reset = None
+    for name in ("curb_bridge", "curb_gap_ground"):
+        if hasattr(env_cfg.rewards.rewards, name):
+            setattr(env_cfg.rewards.rewards, name, None)
     env_cfg.terminations.terrain_out_bound = None
     env_cfg.terminations.root_height = TerminationTermCfg(func=stair_root_height)
     env_cfg.terminations.off_course = TerminationTermCfg(func=off_course)
