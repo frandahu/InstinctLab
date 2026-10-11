@@ -35,8 +35,8 @@ parser.add_argument(
     "--logroot", type=str, default=None, help="Override default log root path, typically `log/instinct_rl/`."
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--motion_root", help="Motion dataset root for Mixed Parkour or Curb Crossing.")
-parser.add_argument("--motion_selection", help="Curated G1 motion YAML for Mixed Parkour or Curb Crossing.")
+parser.add_argument("--motion_root", help="Motion dataset root for Mixed, visual foothold, or Curb Crossing.")
+parser.add_argument("--motion_selection", help="Curated G1 motion YAML for Mixed, visual foothold, or Curb Crossing.")
 parser.add_argument("--warm_start", help="Curb crossing only: initialize policy/value weights, with fresh AMP and optimizers.")
 parser.add_argument(
     "--distributed",
@@ -58,8 +58,10 @@ cli_args.add_instinct_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 motion_tasks = ("Instinct-Parkour-Mixed-Amp-G1-v0", "Instinct-Parkour-Curb-Crossing-Amp-G1-v0")
+visual_tasks = ("Instinct-Parkour-Visual-Foothold-Amp-G1-v0", "Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0")
+motion_tasks = (*motion_tasks, *visual_tasks)
 if (args_cli.motion_root or args_cli.motion_selection) and args_cli.task not in motion_tasks:
-    parser.error("--motion_root/--motion_selection require a Mixed Parkour or Curb Crossing task")
+    parser.error("--motion_root/--motion_selection require a Mixed, visual foothold, or Curb Crossing task")
 if args_cli.warm_start and (args_cli.task != motion_tasks[1] or args_cli.resume):
     parser.error("--warm_start requires Curb Crossing and cannot be combined with --resume")
 if "LOCAL_RANK" in os.environ:
@@ -158,7 +160,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"AMP coef={agent_cfg.algorithm.discriminator_reward_coef}, warm_start={args_cli.warm_start}",
             flush=True,
         )
-    if args_cli.task == "Instinct-Parkour-Mixed-Amp-G1-v0":
+    if args_cli.task in ("Instinct-Parkour-Mixed-Amp-G1-v0", *visual_tasks):
         from check_parkour_motions import configure_training_motions
 
         motion_inventory = configure_training_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
@@ -200,8 +202,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     # specify directory for logging experiments
-    if args_cli.task == "Instinct-Parkour-Curb-Crossing-Amp-G1-v0":
+    if args_cli.task in ("Instinct-Parkour-Curb-Crossing-Amp-G1-v0", *visual_tasks):
         env_cfg.scene.terrain.terrain_generator.seed = env_cfg.seed
+    if args_cli.task in visual_tasks:
+        reference = "depth_only" if hasattr(env_cfg, "visual_foothold") else "none (baseline)"
+        print(f"[VISUAL] task={args_cli.task}, resume={agent_cfg.resume}, "
+              f"reference={reference}, matched_image_delay=1 control step", flush=True)
     if args_cli.logroot is None:
         log_root_path = os.path.join("logs", "instinct_rl", agent_cfg.experiment_name)
         log_root_path = os.path.abspath(log_root_path)
@@ -271,6 +277,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             save_runtime_sources(runner, env_cfg, log_dir)
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
+    if args_cli.task in visual_tasks and not ("LOCAL_RANK" in os.environ and dist.get_rank() > 0):
+        from instinctlab.tasks.parkour.config.g1.visual_foothold.runtime import save_visual_runtime
+
+        save_visual_runtime(env_cfg, log_dir)
     # load the checkpoint
     if agent_cfg.resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")

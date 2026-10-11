@@ -10,6 +10,26 @@ from . import agents
 task_entry = "instinctlab.tasks.parkour.config.g1"
 
 gym.register(
+    id="Instinct-Parkour-Visual-Foothold-Amp-G1-v0",
+    entry_point=f"{task_entry}.visual_foothold.env:VisualFootholdEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.visual_foothold.config:VisualFootholdEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{task_entry}.visual_foothold.config:VisualFootholdRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.visual_foothold.config:VisualBaselineEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{task_entry}.visual_foothold.config:VisualBaselineRunnerCfg",
+    },
+)
+
+gym.register(
     id="Instinct-Parkour-Curb-Crossing-Amp-G1-v0",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
