@@ -164,6 +164,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         from check_parkour_motions import configure_training_motions
 
         motion_inventory = configure_training_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
+        if args_cli.task in visual_tasks:
+            motion_inventory["reference_role"] = "AMP expert distribution; not time-aligned motion tracking"
+            print(f"[VISUAL AMP] expert root={motion_inventory['root']}, "
+                  f"files={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}; "
+                  "shared across terrain types, depth still supplies foothold targets", flush=True)
         print(
             f"[MIXED] motions={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}, "
             f"AMP reward coef={agent_cfg.algorithm.discriminator_reward_coef}, "

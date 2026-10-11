@@ -1,4 +1,4 @@
-"""Matched fresh A/B configurations, using the existing Mixed AMP recipe."""
+"""Matched fresh A/B configurations, using GRAIL as the AMP expert corpus."""
 
 import copy
 
@@ -8,15 +8,17 @@ from isaaclab.utils import configclass
 from ..mixed_parkour_cfg import G1MixedParkourEnvCfg
 from ..agents.mixed_parkour_rl_cfg import G1MixedParkourPPORunnerCfg
 from . import mdp
+from .motions import grail_motion_reference
 from .perception import VisualFootholdSettings
 
 
 @configclass
 class VisualBaselineEnvCfg(G1MixedParkourEnvCfg):
-    """A: original Mixed policy with the same fixed image delay as B."""
+    """A: Mixed policy with the same GRAIL corpus and fixed image delay as B."""
 
     def __post_init__(self):
         super().__post_init__()
+        self.scene.motion_reference = grail_motion_reference(self.scene.motion_reference)
         self.scene.terrain.terrain_generator = copy.deepcopy(self.scene.terrain.terrain_generator)
         for group in (self.observations.policy, self.observations.critic):
             group.depth_image.params["delayed_frame_ranges"] = (1, 1)

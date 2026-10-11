@@ -32,6 +32,9 @@ A 任务：`Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0`。
 8. 增加 41 维低维观测：双足位置、滤波速度、接触状态、支撑有效性、目标、误差、摆动脚、
    步相、目标/锚点有效性、摆动参考、重力方向和观测年龄。MoE 深度编码器、PPO/AMP、
    29 关节位置控制和原奖励保留。
+9. A/B 默认都使用 `data/grail_instinctlab/` 内已经重定向的 G1 GRAIL 动作作为 AMP 专家数据。
+   四类子集为 `curb`、`slope`、`stair_p1`、`stair_p2`，每个片段初始等权。
+   原 `Instinct-Parkour-Mixed-Amp-G1-v0` 仍默认使用作者步行语料，避免改变原基线。
 
 初版主要针对前向行走和适度转向：目标方向相对当前锚点偏转超过 20 度时不生成有效目标。
 起步时脚下区域可能尚未被相机观测；此时目标无效，仍由原 Mixed/AMP 奖励引导起步，
@@ -94,8 +97,29 @@ python -u scripts/instinct_rl/train.py \
 
 B 日志目录：`logs/instinct_rl/g1_parkour_visual_foothold/`。
 不加 `--resume`、`--load_run` 或 `--warm_start`，不加载 model_24000。
-默认继续使用 Mixed 的作者步行 AMP 数据；如需 GRAIL，A/B 都显式传入相同的
-`--motion_root` 和 `--motion_selection`，核对清单哈希。
+默认已切换为 GRAIL AMP 专家池；没有按地形切换数据，也没有新增逐帧全身动作跟踪。
+深度图仍负责落脚参考，GRAIL 通过原有 AMP 判别器提供运动先验。
+
+服务器需要已有转换结果 `data/grail_instinctlab/{curb,slope,stair_p1,stair_p2}/*_retargeted.npz`。
+不会上传数据集，也不会自动下载、重新转换或在缺失时回退到作者语料。
+训练入口逐文件检查数据格式并记录哈希、实际清单和初始采样概率到
+`params/motion_inventory.json`，启动时打印 `[VISUAL AMP]`。
+本地现有四类数据分别为 500、500、250、250 条，共 1500 条；服务器实际数量以检查结果为准。
+
+可先离线检查（不启动仿真）：
+
+```bash
+python scripts/instinct_rl/check_parkour_motions.py --motion_root /workspace/instinctlab/data/grail_instinctlab
+```
+
+非默认目录可通过 `--motion_root` 或 `INSTINCTLAB_GRAIL_MOTION_ROOT` 指定。
+通用 `INSTINCTLAB_PARKOUR_MOTION_ROOT` / `INSTINCTLAB_PARKOUR_MOTION_SELECTION` 仍可覆盖默认值；
+若之前设置过作者语料的环境变量，应先取消，或显式传入 GRAIL 的 `--motion_root`。
+使用自选清单时加 `--motion_selection`，YAML 权重键必须为 `motion_weights`。
+A/B 必须使用相同的数据清单和权重，核对保存的哈希。
+
+更换专家数据后从零训练，不恢复旧作者语料模型；已有恢复检查会拒绝数据哈希或权重不匹配。
+此改动不会让旧 checkpoint 自动获得 GRAIL 经验。
 
 空闲资源允许时，另起 A 组，保持环境数、种子、迭代预算和运动数据一致：
 

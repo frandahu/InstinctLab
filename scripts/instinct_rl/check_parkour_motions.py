@@ -161,7 +161,7 @@ def check_resume_motion_inventory(checkpoint, inventory):
     previous = Path(checkpoint).resolve().parent / "params/motion_inventory.json"
     if not previous.is_file():
         raise ValueError("Mixed Parkour resume requires params/motion_inventory.json from the original run. "
-                         "For the new author reference recipe, start fresh without --resume.")
+                         "For a new expert reference corpus, start fresh without --resume.")
     old = json.loads(previous.read_text(encoding="utf-8"))
     def signature(report):
         return [(m.get("path"), m.get("sha256"), m.get("weight"), m.get("frames"), m.get("framerate"))
