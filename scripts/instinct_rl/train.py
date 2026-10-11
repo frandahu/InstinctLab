@@ -37,6 +37,13 @@ parser.add_argument(
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--motion_root", help="Motion dataset root for Mixed, visual foothold, or Curb Crossing.")
 parser.add_argument("--motion_selection", help="Curated G1 motion YAML for Mixed, visual foothold, or Curb Crossing.")
+parser.add_argument(
+    "--author_motion_root", help="Visual foothold only: author walking corpus root; retained alongside GRAIL."
+)
+parser.add_argument(
+    "--amp_grail_fraction", type=float, default=None,
+    help="Visual foothold only: initial GRAIL clip probability (default 0.5); remainder is author data.",
+)
 parser.add_argument("--warm_start", help="Curb crossing only: initialize policy/value weights, with fresh AMP and optimizers.")
 parser.add_argument(
     "--distributed",
@@ -62,6 +69,10 @@ visual_tasks = ("Instinct-Parkour-Visual-Foothold-Amp-G1-v0", "Instinct-Parkour-
 motion_tasks = (*motion_tasks, *visual_tasks)
 if (args_cli.motion_root or args_cli.motion_selection) and args_cli.task not in motion_tasks:
     parser.error("--motion_root/--motion_selection require a Mixed, visual foothold, or Curb Crossing task")
+if (args_cli.author_motion_root or args_cli.amp_grail_fraction is not None) and args_cli.task not in visual_tasks:
+    parser.error("--author_motion_root/--amp_grail_fraction require a visual foothold task")
+if args_cli.amp_grail_fraction is not None and not 0 < args_cli.amp_grail_fraction < 1:
+    parser.error("--amp_grail_fraction must be strictly between 0 and 1; both corpora must participate")
 if args_cli.warm_start and (args_cli.task != motion_tasks[1] or args_cli.resume):
     parser.error("--warm_start requires Curb Crossing and cannot be combined with --resume")
 if "LOCAL_RANK" in os.environ:
@@ -163,12 +174,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.task in ("Instinct-Parkour-Mixed-Amp-G1-v0", *visual_tasks):
         from check_parkour_motions import configure_training_motions
 
-        motion_inventory = configure_training_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
         if args_cli.task in visual_tasks:
-            motion_inventory["reference_role"] = "AMP expert distribution; not time-aligned motion tracking"
-            print(f"[VISUAL AMP] expert root={motion_inventory['root']}, "
-                  f"files={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}; "
-                  "shared across terrain types, depth still supplies foothold targets", flush=True)
+            from prepare_visual_motions import configure_visual_motions
+
+            motion_inventory = configure_visual_motions(
+                env_cfg,
+                args_cli.motion_root,
+                args_cli.motion_selection,
+                args_cli.author_motion_root,
+                0.5 if args_cli.amp_grail_fraction is None else args_cli.amp_grail_fraction,
+            )
+            print(
+                f"[VISUAL AMP] sources={motion_inventory['initial_source_probability']}, "
+                f"files={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}; "
+                "ONE policy, shared across terrain types; depth supplies foothold targets", flush=True,
+            )
+        else:
+            motion_inventory = configure_training_motions(env_cfg, args_cli.motion_root, args_cli.motion_selection)
         print(
             f"[MIXED] motions={motion_inventory['files']}, subsets={motion_inventory['subset_counts']}, "
             f"AMP reward coef={agent_cfg.algorithm.discriminator_reward_coef}, "

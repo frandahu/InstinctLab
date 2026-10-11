@@ -1,14 +1,15 @@
-# 深度落脚参考：从零训练的 A/B 实验
+# 深度落脚参考：作者数据 + GRAIL 的单策略训练
 
-B 任务：`Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。
-A 任务：`Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0`。
+使用任务：`Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。
+一条训练命令只启动一个策略，不会自动启动 A/B 两组训练。
+`Baseline` 任务仅保留为以后可选的对照入口，现在不需要运行。
 
 实现独立保存在
 `source/instinctlab/instinctlab/tasks/parkour/config/g1/visual_foothold/`。
 现有 Mixed、foot_state_demo、Curb Crossing 任务不变。继续使用现有
 `scripts/instinct_rl/train.py`，保留 cuDNN bootstrap、数据准备和最终 checkpoint 保存。
 
-## B 实现了什么
+## 实现了什么
 
 1. 使用同一个躯干相机，读取米制 `distance_to_image_plane`，裁剪与原策略一致的
    下半部中央 32×18 区域。使用项目实际的相机局部射线和 +X 光轴恢复点云，
@@ -32,8 +33,11 @@ A 任务：`Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0`。
 8. 增加 41 维低维观测：双足位置、滤波速度、接触状态、支撑有效性、目标、误差、摆动脚、
    步相、目标/锚点有效性、摆动参考、重力方向和观测年龄。MoE 深度编码器、PPO/AMP、
    29 关节位置控制和原奖励保留。
-9. A/B 默认都使用 `data/grail_instinctlab/` 内已经重定向的 G1 GRAIL 动作作为 AMP 专家数据。
-   四类子集为 `curb`、`slope`、`stair_p1`、`stair_p2`，每个片段初始等权。
+9. AMP 同时使用作者步行语料和已重定向的 G1 GRAIL 动作，初始片段抽样权重各占 50%。
+   作者数据来自 `data/hiking_in_the_wild/parkour_motion_reference/` 的原始选择清单；
+   GRAIL 来自 `data/grail_instinctlab/` 的 `curb`、`slope`、`stair_p1`、`stair_p2`。
+   各来源内部保留原相对权重，GRAIL 默认逐片段等权。这是一个联合专家池、一个策略，
+   不按地形切换，也不要求两类数据各贡献一半训练帧。50/50 是初始设置，尚未训练验证。
    原 `Instinct-Parkour-Mixed-Amp-G1-v0` 仍默认使用作者步行语料，避免改变原基线。
 
 初版主要针对前向行走和适度转向：目标方向相对当前锚点偏转超过 20 度时不生成有效目标。
@@ -76,7 +80,7 @@ A 任务：`Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0`。
 cd /workspace/instinctlab
 TRAIN_DEVICE=cuda:0
 
-# B 的小规模启动检查：不是正式训练，也不恢复旧模型
+# 主任务的小规模启动检查：不是正式训练，也不恢复旧模型
 python -u scripts/instinct_rl/train.py \
   --task Instinct-Parkour-Visual-Foothold-Amp-G1-v0 \
   --headless --num_envs 32 --max_iterations 5 \
@@ -91,50 +95,49 @@ python -u scripts/instinct_rl/train.py \
 python -u scripts/instinct_rl/train.py \
   --task Instinct-Parkour-Visual-Foothold-Amp-G1-v0 \
   --headless --num_envs 1024 --max_iterations 30000 \
-  --device "$TRAIN_DEVICE" --seed 42 --run_name visual_foothold_B_fresh \
+  --device "$TRAIN_DEVICE" --seed 42 --run_name visual_author_grail_fresh \
   agent.device="$TRAIN_DEVICE" agent.resume=False
 ```
 
-B 日志目录：`logs/instinct_rl/g1_parkour_visual_foothold/`。
+训练日志目录：`logs/instinct_rl/g1_parkour_visual_foothold/`。
 不加 `--resume`、`--load_run` 或 `--warm_start`，不加载 model_24000。
-默认已切换为 GRAIL AMP 专家池；没有按地形切换数据，也没有新增逐帧全身动作跟踪。
-深度图仍负责落脚参考，GRAIL 通过原有 AMP 判别器提供运动先验。
+默认同时加载作者数据和 GRAIL，二者都通过原有 AMP 判别器提供运动先验。
+深度图负责落脚参考；没有按地形切换数据，也没有新增逐帧全身动作跟踪。
 
 服务器需要已有转换结果 `data/grail_instinctlab/{curb,slope,stair_p1,stair_p2}/*_retargeted.npz`。
-不会上传数据集，也不会自动下载、重新转换或在缺失时回退到作者语料。
+还需要原作者语料；它继续复用已有的固定哈希准备入口，已存在时不重复下载。
+GRAIL 不会自动下载或重新转换；缺失任一必需子集时停止准备，不会只用作者数据继续。
+不会删除、复制或改写两类源动作。只生成一个带 `motion_weights` 的联合清单，保存在
+`outputs/visual_foothold/reference_manifests/`，然后交给原有动作加载器。
 训练入口逐文件检查数据格式并记录哈希、实际清单和初始采样概率到
 `params/motion_inventory.json`，启动时打印 `[VISUAL AMP]`。
-本地现有四类数据分别为 500、500、250、250 条，共 1500 条；服务器实际数量以检查结果为准。
+本地作者数据为 1 个整合文件，GRAIL 为 1500 个文件，合计 1501 个文件。
+抽样按来源归一化，作者占 50%，curb/slope 各约 16.67%，stair_p1/stair_p2 各约 8.33%。
+文件数量不等于动作种类数量，抽样概率也不是训练帧比例。服务器实际数量以检查结果为准。
 
 可先离线检查（不启动仿真）：
 
 ```bash
-python scripts/instinct_rl/check_parkour_motions.py --motion_root /workspace/instinctlab/data/grail_instinctlab
+python scripts/instinct_rl/prepare_visual_motions.py --motion_root /workspace/instinctlab/data/grail_instinctlab
 ```
 
-非默认目录可通过 `--motion_root` 或 `INSTINCTLAB_GRAIL_MOTION_ROOT` 指定。
+非默认 GRAIL 目录可通过 `--motion_root` 或 `INSTINCTLAB_GRAIL_MOTION_ROOT` 指定。
+作者数据可通过 `--author_motion_root` 或 `INSTINCTLAB_AUTHOR_MOTION_ROOT` 指定，目录中
+需有 `parkour_motion_without_run.yaml`。`--amp_grail_fraction` 可调整 GRAIL 初始抽样份额，
+必须严格介于 0 与 1，保证两类来源都参与。
 通用 `INSTINCTLAB_PARKOUR_MOTION_ROOT` / `INSTINCTLAB_PARKOUR_MOTION_SELECTION` 仍可覆盖默认值；
 若之前设置过作者语料的环境变量，应先取消，或显式传入 GRAIL 的 `--motion_root`。
-使用自选清单时加 `--motion_selection`，YAML 权重键必须为 `motion_weights`。
-A/B 必须使用相同的数据清单和权重，核对保存的哈希。
+使用 GRAIL 自选清单时加 `--motion_selection`，它只改变 GRAIL 部分，作者数据仍参与。
+YAML 权重键必须为 `motion_weights`。训练日志会打印 `sources={'author': 0.5, 'grail': 0.5}`，
+`params/motion_inventory.json` 记录最终文件、来源、哈希及抽样权重。
+多进程训练不分片专家池，避免唯一作者文件只分到一个进程；每进程都会加载联合专家池。
 
 更换专家数据后从零训练，不恢复旧作者语料模型；已有恢复检查会拒绝数据哈希或权重不匹配。
 此改动不会让旧 checkpoint 自动获得 GRAIL 经验。
 
-空闲资源允许时，另起 A 组，保持环境数、种子、迭代预算和运动数据一致：
-
-```bash
-python -u scripts/instinct_rl/train.py \
-  --task Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0 \
-  --headless --num_envs 1024 --max_iterations 30000 \
-  --device "$TRAIN_DEVICE" --seed 42 --run_name visual_foothold_A_fresh \
-  agent.device="$TRAIN_DEVICE" agent.resume=False
-```
-
-A 日志目录：`logs/instinct_rl/g1_parkour_visual_baseline/`。
-两组保持相同地形生成种子、原 Mixed 课程和控制配置；学习后的课程等级轨迹可能不同，
-所以最终必须在相同固定几何上比较。B 增加了视觉几何处理、接触输入和结构化参考，
-该对照衡量组合方法，不单独归因于 FK 或滤波。
+如果以后确实要做对照，再手动使用 `Instinct-Parkour-Visual-Foothold-Baseline-Amp-G1-v0`。
+该任务也使用相同的联合专家池，但没有新增足端参考观测和奖励；不会随主任务自动启动。
+届时应保持相同数据、种子和训练预算，并在相同固定几何上比较。
 
 ## B 的确定性播放、MP4 和 CSV
 
@@ -158,6 +161,14 @@ MP4 复用已有 FFmpeg 录制器，未自动安装依赖。当前独立多地�
 不要直接用旧 eval_mixed_parkour.py 评估 B；后续固定路线适配应保留这个新观测接口。
 
 ## 本地 CPU 检查
+
+联合专家池检查只需要已有 NumPy/PyYAML，不需要 Torch：
+
+```bash
+python scripts/visual_foothold/test_motion_pool.py -v
+```
+
+足端和感知算法检查：
 
 ```bash
 python scripts/visual_foothold/test_core.py -v

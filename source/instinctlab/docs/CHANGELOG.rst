@@ -14,6 +14,8 @@ Fixed
 ^^^^^
 
 * Accepted the Curb Crossing task in the shared frozen-policy evaluator and foot-state demo.
+* Retained the author walking corpus alongside GRAIL in visual foothold AMP training,
+  with explicit source sampling weights and a recorded joint expert selection.
 
 0.1.0 (2024-01-29)
 ~~~~~~~~~~~~~~~~~~

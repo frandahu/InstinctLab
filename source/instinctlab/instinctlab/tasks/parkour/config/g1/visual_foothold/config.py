@@ -1,4 +1,4 @@
-"""Matched fresh A/B configurations, using GRAIL as the AMP expert corpus."""
+"""Visual foothold training with author + GRAIL experts, and an optional baseline."""
 
 import copy
 
@@ -14,7 +14,7 @@ from .perception import VisualFootholdSettings
 
 @configclass
 class VisualBaselineEnvCfg(G1MixedParkourEnvCfg):
-    """A: Mixed policy with the same GRAIL corpus and fixed image delay as B."""
+    """Optional baseline; the training entry point combines author + GRAIL experts."""
 
     def __post_init__(self):
         super().__post_init__()

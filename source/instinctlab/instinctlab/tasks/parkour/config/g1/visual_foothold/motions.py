@@ -1,4 +1,4 @@
-"""GRAIL expert motions shared by the visual foothold A/B experiments."""
+"""Locate the GRAIL input to the joint author + GRAIL AMP expert pool."""
 
 import copy
 import os
@@ -10,11 +10,12 @@ GRAIL_SUBSETS = ("curb", "slope", "stair_p1", "stair_p2")
 
 
 def grail_motion_reference(reference):
-    """Replace the inherited author corpus without modifying the Mixed task.
+    """Set the GRAIL input root without modifying the original Mixed task.
 
     Use converted G1 NPZs as an unconditional AMP expert pool, not as terrain
-    labels or time-aligned foothold targets. CLI overrides and inventory/resume
-    validation remain in the existing training entry point.
+    labels or time-aligned foothold targets. Before gym.make, train.py calls
+    configure_visual_motions to combine this source with the retained author
+    corpus, then records the final joint selection and sampling weights.
     """
     reference = copy.deepcopy(reference)
     motion = reference.motion_buffers["run_walk"]
