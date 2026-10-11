@@ -10,6 +10,11 @@ Added
 * Added an isolated G1 curb crossing curriculum and contact-based crossing rewards,
   GRAIL kinematic reference preparation, and policy warm-start with fresh AMP state.
 
+Fixed
+^^^^^
+
+* Accepted the Curb Crossing task in the shared frozen-policy evaluator and foot-state demo.
+
 0.1.0 (2024-01-29)
 ~~~~~~~~~~~~~~~~~~
 

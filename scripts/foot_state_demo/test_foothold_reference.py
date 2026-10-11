@@ -2,6 +2,7 @@
 
 import csv
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,31 @@ def curb_case():
 
 
 class GeometryTests(unittest.TestCase):
+    def test_curb_crossing_task_cli_writes_requested_gaps_and_reference_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "preview"
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("run_demo.py")),
+                 "--task", "Instinct-Parkour-Curb-Crossing-Amp-G1-v0",
+                 "--load_run", "unused", "--checkpoint", "model_5000.pt",
+                 "--device", "cuda:0", "--headless", "--seed", "42",
+                 "--terrain_mode", "curb", "--num_envs", "4", "--episodes_per_env", "1",
+                 "--curb_count", "5", "--curb_height_range", "0.12", "0.20",
+                 "--curb_depth_range", "0.80", "1.10", "--curb_gaps", "0.30", "0.85", "0.60", "1.00",
+                 "--max_step_m", "0.60", "--episode_length_s", "120", "--max_steps", "6000",
+                 "--video", "--video_view", "overview", "--output_dir", str(output), "--dry_run"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((output / "cases.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["arguments"]["task"], "Instinct-Parkour-Curb-Crossing-Amp-G1-v0")
+        self.assertEqual(manifest["foot_options"]["max_step_m"], 0.60)
+        self.assertEqual(len(manifest["cases"]), 4)
+        for case in manifest["cases"]:
+            self.assertEqual([c["gap_after_m"] for c in case["curbs"]], [0.30, 0.85, 0.60, 1.00, 1.00])
+            self.assertEqual([r["rule"] for r in case["curb_reference_rules"]],
+                             ["bridge_short_gap", "via_ground", "via_ground", "via_ground"])
+
     def test_close_gap_bridges_but_far_gap_requires_ground_reference(self):
         geometry = LaneGeometry(curb_case())
         bridge = geometry.plan([1.85, .1, .15], 1)
