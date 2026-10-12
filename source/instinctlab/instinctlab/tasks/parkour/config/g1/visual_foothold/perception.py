@@ -126,8 +126,14 @@ class SupportGrid:
         return F.grid_sample(values.float().view(-1, 1, self.ny, self.nx), grid[:, None],
                              mode="nearest", align_corners=True).squeeze(1).squeeze(1)
 
-    def choose(self, points, valid, support, swing, direction, speed):
-        """Choose a reachable observed patch; no terrain labels or case metadata."""
+    def choose(self, points, valid, support, swing, direction, speed, swing_start):
+        """Minimize cost over patches satisfying *all* geometry/coverage tests.
+
+        Support defines reachability; the actual swing foot defines the corridor,
+        matching the controller's reference. Unknown middle/end samples reject a
+        candidate even when its landing footprint is observed. Input samples may
+        include unexpired, reliably transformed history, never invented ground.
+        """
         h, observed, safe, obstacle_h, obstacle_seen = self.build(points, valid)
         xy = self.xy[None].expand(len(points), -1, -1)
         direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -143,6 +149,31 @@ class SupportGrid:
         feasible &= (h - support[:, 2, None]).abs() <= self.cfg.max_height_change
         # The rectangular support stencil is conservative only in this yaw range.
         feasible &= (direction[:, 0] > math.cos(math.radians(20)))[:, None]
+        reachable_count = feasible.sum(-1)
+        # Bound temporary storage for large training batches. Test each candidate
+        # before ranking, rather than rejecting only the cheapest landing patch.
+        corridor_ok = torch.zeros_like(feasible)
+        required_phase = torch.linspace(0, 1, 9, device=points.device)[3:][None, None, :, None]
+        observed_samples = torch.zeros(len(points), device=points.device)
+        for begin in range(0, self.nx * self.ny, 128):
+            end = min(begin + 128, self.nx * self.ny)
+            path = swing_start[:, None, None, :2] * (1-required_phase)
+            path = path + xy[:, begin:end, None] * required_phase
+            seen = self.sample(obstacle_seen, path.flatten(1, 2)).reshape(len(points), end-begin, 6) > 0.5
+            corridor_ok[:, begin:end] = seen.all(-1)
+            observed_samples += (seen & feasible[:, begin:end, None]).sum((1, 2))
+        feasible &= corridor_ok
+        self.diagnostics = {
+            "safe_candidates": safe.sum(-1),
+            "reachable_candidates": reachable_count,
+            "corridor_candidates": feasible.sum(-1),
+            "no_observations": ~valid.any(-1),
+            "no_safe_candidates": valid.any(-1) & ~safe.any(-1),
+            "feasibility_failures": safe.any(-1) & (reachable_count == 0),
+            "corridor_unknown": (reachable_count > 0) & ~feasible.any(-1),
+            "corridor_required_samples": reachable_count * 6,
+            "corridor_observed_samples": observed_samples,
+        }
         cost = (xy - nominal[:, None]).square().sum(-1)
         # Same-height platforms win over dropping into short curb gaps when reachable.
         cost += 0.6 * (h - support[:, 2, None]).abs()
@@ -153,13 +184,14 @@ class SupportGrid:
         target_valid = feasible.any(-1)
         # Check observed swing corridor; unseen space is not silently treated as clear.
         phase = torch.linspace(0, 1, 9, device=points.device)[None, :, None]
-        path_xy = support[:, None, :2] * (1-phase) + target[:, None, :2] * phase
+        path_xy = swing_start[:, None, :2] * (1-phase) + target[:, None, :2] * phase
         # A depth-discontinuity cell is unsuitable for support, but its highest
         # observed point still contributes to swing clearance. Do not erase the
         # stair riser from the obstacle map when rejecting its mixed-height cell.
         path_h = self.sample(obstacle_h, path_xy)
         path_seen = self.sample(obstacle_seen, path_xy) > 0.5
-        # Initial support vicinity may be out of view. End/middle corridor must be seen.
-        target_valid &= path_seen[:, 3:].all(-1)
-        apex = torch.maximum(path_h.masked_fill(~path_seen, -float("inf")).amax(-1), target[:, 2])
+        # Coverage has already filtered every candidate. Initial swing vicinity
+        # may be out of view; the existing middle/end coverage rule is unchanged.
+        apex = torch.maximum(path_h.masked_fill(~path_seen, -float("inf")).amax(-1),
+                             torch.maximum(target[:, 2], swing_start[:, 2]))
         return target, target_valid, apex + self.cfg.swing_clearance

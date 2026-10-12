@@ -66,7 +66,12 @@
 - `touchdown_error_m`、`touchdown_hit_5cm`：有有效指令时的 FK 落脚误差；
 - `visual_risk_fraction`、`missed_steps`、`anchor_losses`。
 
-没有有效指令时，误差指标的零值不代表准确，应同时看 `commanded_touchdowns`。
+修复后的训练日志用 `VisualFoothold/raw/` 记录分子、分母和事件总量；误差均值不再填零。
+同时记录 `touchdown_samples_available`，回放 JSON 在没有有效样本时输出 `null`（N/A）。
+用聚合的 `raw/error_sum_m / raw/commanded_touchdowns` 计算误差，不能平均每回合误差。
+完整修复说明、指标口径、验证门槛和历史 checkpoint 的服务器命令见
+[Visual Foothold Chain 修复与验证](CHAIN_FIX.md)。以下首次训练示例仍使用默认 50/50 专家池；
+历史 `visual_author_grail_fresh` 实际使用 75% GRAIL，恢复时必须按保存清单保持一致。
 有效目标覆盖率长期接近零时不能把训练称为成功接入落脚学习，应先查深度覆盖与锚点有效性。
 参数、运动数据清单和实现 SHA256 保存在运行的 `params/` 中，新增
 `visual_foothold_runtime.json`。固定种子还不保证 CUDA 位级确定性。
@@ -175,5 +180,6 @@ python scripts/visual_foothold/test_core.py -v
 ```
 
 需要已有 Torch。覆盖项目光轴/深度单位、未知区域与楼梯边界拒绝、斜坡、近远 curb 选择、
-与原 NumPy FK 的独立对照、接触确认、摆动前目标锁定、支撑丢失以及环境重置隔离。
+与原 NumPy FK 的独立对照、多候选共同可行性、实际摆脚走廊、历史覆盖与过期、接触确认、
+确认期间锚点移动、跨步相结算、触地取消与反弹、摆动前目标锁定、支撑丢失以及环境重置隔离。
 这些检查不启动 Isaac Sim，不证明 CUDA 性能、相机/管理器运行兼容性或训练效果。

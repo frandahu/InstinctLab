@@ -45,12 +45,21 @@ class VisualFootholdController:
         self.candidate_valid = torch.zeros(n, 2, dtype=torch.bool, device=device)
         self.candidate_slot = torch.full((n, 2), -1, dtype=torch.long, device=device)
         self.candidate_risk = torch.zeros(n, 2, device=device)
+        self.candidate_known = torch.zeros(n, 2, dtype=torch.bool, device=device)
+        self.paid_slot = torch.full((n, 2), -1, dtype=torch.long, device=device)
         self.previous_relative = torch.zeros(n, 3, device=device)
         self.observation = torch.zeros(n, 41, device=device)
         self.reward = {name: torch.zeros(n, device=device) for name in ("touchdown", "swing", "edge", "miss")}
         self.stats = {name: torch.zeros(n, device=device) for name in (
             "ticks", "valid_ticks", "support_ticks", "touchdowns", "commanded_touchdowns", "error_sum_m",
             "hits", "visual_risk", "missed_steps", "anchor_losses",
+            "moving_ticks", "target_exposure_ticks", "target_retained_ticks", "planning_attempts", "targets_generated",
+            "safe_candidates", "reachable_candidates", "corridor_candidates", "no_observations", "no_safe_candidates",
+            "feasibility_failures", "corridor_unknown", "corridor_required_samples", "corridor_observed_samples",
+            "memory_frames_used", "history_points_used", "targets_cleared", "clear_anchor_loss", "clear_transfer",
+            "clear_phase", "clear_stopped", "cleared_unlanded", "touchdown_candidates", "candidate_aborts",
+            "confirmed_commanded_touchdowns", "reward_payments", "duplicate_payments_blocked", "risk_samples",
+            "reward_touchdown_integral", "reward_swing_integral", "reward_edge_integral", "reward_miss_integral",
         )}
         self.last_error = torch.zeros(n, device=device)
         self.last_touchdown = torch.zeros(n, dtype=torch.bool, device=device)
@@ -67,10 +76,14 @@ class VisualFootholdController:
         self.landed[ids] = False
         self.slot[ids] = -1
         self.candidate_valid[ids] = False
+        self.candidate_slot[ids] = -1
+        self.paid_slot[ids] = -1
+        self.candidate_known[ids] = False
         self.target[ids] = 0
         self.start[ids] = 0
         self.observation[ids] = 0
         self.last_touchdown[ids] = False
+        self.last_error[ids] = 0
         for tensor in (*self.stats.values(), *self.reward.values()):
             tensor[ids] = 0
 
@@ -79,6 +92,7 @@ class VisualFootholdController:
         """Consume one observation; advance=False bootstraps reset rows without time travel."""
         fresh = self.contact.fresh.clone()
         active = advance | fresh
+        previous_valid = self.valid.clone()
         candidate, touchdown = self.contact.update(velocity, force, advance)
         support = self.contact.state == 2
         self.time += advance.float() * self.dt
@@ -126,11 +140,17 @@ class VisualFootholdController:
         anchor_ok = (selected >= 0) & upright_anchor
         lost = active & ((old >= 0) & ~old_ok & ~transferable | ~anchor_ok)
         clear = active & ((changed & ~transferable) | lost | fresh)
+        cleared = clear & previous_valid
+        self.stats["clear_anchor_loss"] += (cleared & lost).float()
+        self.stats["clear_transfer"] += (cleared & ~lost).float()
+        self.stats["cleared_unlanded"] += (cleared & ~self.landed).float()
         self.point_valid[clear] = False
         self.point_time[clear] = -float("inf")
         self.pending_valid[clear] = False
         self.valid[clear] = False
-        self.candidate_valid[clear] = False
+        # Candidate error/risk are scalar measurements latched in the old frame.
+        # Their lifecycle ends on confirmation, contact abort or episode reset,
+        # independently of map/target invalidation during an anchor transfer.
         # Re-express old data only at a valid support transfer. Otherwise discard.
         self.points[transferable] = (rotate(transform_r[:, None, None], self.points)
                                     + transform_p[:, None, None])[transferable]
@@ -164,6 +184,9 @@ class VisualFootholdController:
         missed = phase_change & self.valid & ~self.landed & moving & ~self.candidate_valid.any(-1)
         self.reward["miss"][missed] = 1 / self.dt
         self.stats["missed_steps"] += missed.float()
+        phase_clear = phase_change & self.valid
+        self.stats["clear_phase"] += phase_clear.float()
+        cleared |= phase_clear
         self.valid[phase_change] = False
         self.landed[phase_change] = False
         self.slot[active] = next_slot[active]
@@ -179,16 +202,29 @@ class VisualFootholdController:
             target, valid, apex = self.grid.choose(
                 flat_points[ids], flat_valid[ids], p_a[ids, other[ids]], self.swing[ids],
                 direction_a[ids], command[ids, :2].norm(dim=-1),
+                p_a[ids, self.swing[ids]],
             )
+            self.stats["planning_attempts"][ids] += 1
+            self.stats["targets_generated"][ids] += valid.float()
+            for name, value in self.grid.diagnostics.items():
+                self.stats[name][ids] += value.float()
+            self.stats["memory_frames_used"][ids] += memory_valid[ids].any(-1).sum(-1)
+            historical = (self.time[:, None] - self.point_time) > self.cfg.capture_interval * self.dt + 1e-6
+            self.stats["history_points_used"][ids] += (memory_valid[ids] & historical[ids, :, None]).sum((1, 2))
             self.target[ids] = target
             self.start[ids] = p_a[ids, self.swing[ids]]
             self.start_time[ids] = self.time[ids]
             self.apex[ids] = apex
             self.valid[ids] = valid
+        stop_clear = active & self.valid & ~moving
+        self.stats["clear_stopped"] += stop_clear.float()
+        cleared |= stop_clear
+        self.stats["targets_cleared"] += cleared.float()
         self.valid = torch.where(active, self.valid & anchor_ok & moving, self.valid)
         # Candidate pose/error is latched now, confirmed 20 ms later, and paid once.
         wanted = F.one_hot(self.swing, 2).bool()
         latch = candidate & wanted & self.valid[:, None] & ~self.landed[:, None]
+        latch &= self.paid_slot != self.slot[:, None]
         error = (p_a - self.target[:, None]).norm(dim=-1)
         self.candidate_valid[candidate] = latch[candidate]
         self.candidate_slot[latch] = self.slot[:, None].expand(-1, 2)[latch]
@@ -199,7 +235,9 @@ class VisualFootholdController:
             risk = 1 - self.grid.sample(safe, p_a[event_ids, ..., :2])
             known = self.grid.sample(seen, p_a[event_ids, ..., :2]) > 0.5
             self.candidate_risk[event_ids] = torch.where(latch[event_ids], risk * known, self.candidate_risk[event_ids])
-        paid = touchdown & self.candidate_valid
+            self.candidate_known[event_ids] = torch.where(latch[event_ids], known, self.candidate_known[event_ids])
+        confirmed = touchdown & self.candidate_valid
+        paid = confirmed & (self.paid_slot != self.candidate_slot)
         score = torch.exp(-self.candidate_error.square() / self.cfg.target_sigma**2)
         self.reward["touchdown"][active] = (score * paid).sum(-1)[active] / self.dt
         self.reward["edge"][active] = (self.candidate_risk * paid).sum(-1)[active] / self.dt
@@ -208,10 +246,17 @@ class VisualFootholdController:
         self.last_touchdown[active] = paid_any[active]
         self.last_error[paid_any] = (self.candidate_error * paid).sum(-1)[paid_any]
         self.stats["touchdowns"] += touchdown.sum(-1)
+        self.stats["touchdown_candidates"] += latch.sum(-1)
+        self.stats["confirmed_commanded_touchdowns"] += confirmed.sum(-1)
+        self.stats["reward_payments"] += paid.sum(-1)
+        self.stats["duplicate_payments_blocked"] += (confirmed & ~paid).sum(-1)
         self.stats["commanded_touchdowns"] += paid.sum(-1)
         self.stats["error_sum_m"] += (self.candidate_error * paid).sum(-1)
         self.stats["hits"] += ((self.candidate_error < 0.05) & paid).sum(-1)
         self.stats["visual_risk"] += (self.candidate_risk * paid).sum(-1)
+        self.stats["risk_samples"] += (self.candidate_known & paid).sum(-1)
+        self.stats["candidate_aborts"] += (self.candidate_valid & (self.contact.state == 0)).sum(-1)
+        self.paid_slot[paid] = self.candidate_slot[paid]
         self.candidate_valid[touchdown | (self.contact.state == 0)] = False
         u = phase
         end_time = (self.slot + 1).float() * self.cfg.step_time
@@ -240,18 +285,28 @@ class VisualFootholdController:
         self.stats["ticks"] += advance.float()
         self.stats["valid_ticks"] += (advance & self.valid).float()
         self.stats["support_ticks"] += (advance & anchor_ok).float()
+        self.stats["moving_ticks"] += (advance & moving).float()
+        self.stats["target_exposure_ticks"] += (advance & previous_valid).float()
+        self.stats["target_retained_ticks"] += (advance & previous_valid & self.valid & ~cleared).float()
+        for name, value in self.reward.items():
+            self.stats["reward_" + name + "_integral"] += value * advance.float() * self.dt
 
     def episode_metrics(self, ids):
-        """Episode ratios include denominators, so missing commands cannot look accurate."""
-        s = {name: value[ids] for name, value in self.stats.items()}
-        return {
-            "valid_target_fraction": (s["valid_ticks"] / s["ticks"].clamp_min(1)).mean(),
-            "support_fraction": (s["support_ticks"] / s["ticks"].clamp_min(1)).mean(),
-            "touchdowns": s["touchdowns"].mean(),
-            "commanded_touchdowns": s["commanded_touchdowns"].mean(),
-            "touchdown_error_m": (s["error_sum_m"].sum() / s["commanded_touchdowns"].sum().clamp_min(1)),
-            "touchdown_hit_5cm": (s["hits"].sum() / s["commanded_touchdowns"].sum().clamp_min(1)),
-            "visual_risk_fraction": (s["visual_risk"].sum() / s["commanded_touchdowns"].sum().clamp_min(1)),
-            "missed_steps": s["missed_steps"].mean(),
-            "anchor_losses": s["anchor_losses"].mean(),
-        }
+        """Log additive totals; derive event ratios from totals, never zero-fill errors.
+
+        Keys stay fixed for runner aggregation. TensorBoard raw totals can be
+        averaged by the runner: divide matching aggregated numerator/denominator
+        tags, rather than averaging per-episode ratios. Playback emits JSON null
+        for absent samples. Availability tags explicitly mark empty reset groups.
+        """
+        s = {name: value[ids].sum() for name, value in self.stats.items()}
+        metrics = {"raw/" + name: value for name, value in s.items()}
+        metrics.update(
+            episodes=s["ticks"].new_tensor(len(ids)),
+            ticks_available=(s["ticks"] > 0).float(),
+            touchdown_samples_available=(s["commanded_touchdowns"] > 0).float(),
+            risk_samples_available=(s["risk_samples"] > 0).float(),
+            valid_target_fraction=s["valid_ticks"] / s["ticks"].clamp_min(1),
+            support_fraction=s["support_ticks"] / s["ticks"].clamp_min(1),
+        )
+        return metrics

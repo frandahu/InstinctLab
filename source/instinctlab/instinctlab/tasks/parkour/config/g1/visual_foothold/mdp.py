@@ -90,6 +90,9 @@ def capture_before_reset(env):
             "time": core.time.clone(), "observation": core.observation.clone(),
             "touchdown": core.last_touchdown.clone(), "error": core.last_error.clone(),
             "contact_state": core.contact.state.clone(),
+            "stats_names": tuple(core.stats),
+            "stats": torch.stack(tuple(core.stats.values()), -1).clone(),
+            "command": env.command_manager.get_command("base_velocity").clone(),
         }
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 

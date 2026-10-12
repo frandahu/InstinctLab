@@ -13,6 +13,9 @@ Added
 Fixed
 ^^^^^
 
+* Filtered all visual foothold candidates by swing-corridor coverage before ranking,
+  aligned the corridor with the actual swing foot, and preserved confirmed touchdown
+  payments across map invalidation with sample-aware lifecycle diagnostics.
 * Accepted the Curb Crossing task in the shared frozen-policy evaluator and foot-state demo.
 * Retained the author walking corpus alongside GRAIL in visual foothold AMP training,
   with explicit source sampling weights and a recorded joint expert selection.
