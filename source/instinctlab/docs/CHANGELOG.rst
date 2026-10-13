@@ -7,6 +7,8 @@ Unreleased
 Added
 ^^^^^
 
+* Added frozen visual foothold reference perturbation and per-foot EWMA compensation,
+  with signed first-contact error records, constrained projection diagnostics and CPU comparison tools.
 * Added an isolated G1 curb crossing curriculum and contact-based crossing rewards,
   GRAIL kinematic reference preparation, and policy warm-start with fresh AMP state.
 

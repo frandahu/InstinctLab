@@ -11,16 +11,18 @@ import torch.nn.functional as F
 
 from .kinematics import ContactObserver, rotate
 from .perception import SupportGrid
+from .reference import ReferenceExperiment
 
 
 class VisualFootholdController:
     """Shared state advanced once per control step by the environment adapter."""
 
-    def __init__(self, n, pixels, dt, settings, device):
+    def __init__(self, n, pixels, dt, settings, device, reference_settings=None):
         settings.validate(dt)
         self.cfg, self.dt, self.n = settings, dt, n
         self.contact = ContactObserver(n, dt, device)
         self.grid = SupportGrid(settings, device)
+        self.reference_experiment = ReferenceExperiment(n, device, reference_settings)
         self.rows = torch.arange(n, device=device)
         self.eye = torch.eye(3, device=device).expand(n, 3, 3)
         slots = math.ceil(settings.memory_s / (settings.capture_interval * dt)) + 1
@@ -63,9 +65,12 @@ class VisualFootholdController:
         )}
         self.last_error = torch.zeros(n, device=device)
         self.last_touchdown = torch.zeros(n, dtype=torch.bool, device=device)
+        # Additive experiment totals share the existing pre-reset logging path.
+        self.stats.update(self.reference_experiment.totals)
 
     def reset(self, ids):
         self.contact.reset(ids)
+        self.reference_experiment.reset(ids)
         self.anchor[ids] = -1
         self.anchor_offset[ids] = self.eye[ids]
         self.point_valid[ids] = False
@@ -92,10 +97,19 @@ class VisualFootholdController:
         """Consume one observation; advance=False bootstraps reset rows without time travel."""
         fresh = self.contact.fresh.clone()
         active = advance | fresh
+        experiment = self.reference_experiment
+        experiment.begin_tick(active)
         previous_valid = self.valid.clone()
         candidate, touchdown = self.contact.update(velocity, force, advance)
         support = self.contact.state == 2
         self.time += advance.float() * self.dt
+        # Resolve previously latched contacts before generating a new command.
+        # At a phase boundary, the next reference can use the just-confirmed
+        # FIRST-contact error without reading any future touchdown information.
+        confirmed_previous = touchdown & self.candidate_valid
+        paid_previous = confirmed_previous & (self.paid_slot != self.candidate_slot)
+        aborted_previous = self.candidate_valid & (self.contact.state == 0)
+        experiment.finish(paid_previous, aborted_previous, self.time)
         scheduled_slot = torch.floor((self.time + 1e-6) / self.cfg.step_time).long()
         scheduled_change = active & (scheduled_slot != self.slot)
         phase = ((self.time - scheduled_slot.float() * self.cfg.step_time) / self.cfg.step_time).clamp(0, 1)
@@ -156,6 +170,7 @@ class VisualFootholdController:
                                     + transform_p[:, None, None])[transferable]
         self.pending[transferable] = (rotate(transform_r[:, None], self.pending) + transform_p[:, None])[transferable]
         self.target[transferable] = (rotate(transform_r, self.target) + transform_p)[transferable]
+        experiment.transform(transferable, transform_r, transform_p)
         self.start[transferable] = (rotate(transform_r, self.start) + transform_p)[transferable]
         # Transform an upper height bound over the local grid, including small
         # anchor tilts; a scalar translation alone would underestimate clearance.
@@ -199,11 +214,13 @@ class VisualFootholdController:
         if len(ids):
             direction_b = torch.cat((command[:, :2], torch.zeros_like(command[:, :1])), -1)
             direction_a = rotate(r.transpose(-1, -2), direction_b)[:, :2]
+            offset = experiment.propose(ids, self.swing[ids], (r.transpose(-1, -2) @ heading)[ids])
             target, valid, apex = self.grid.choose(
                 flat_points[ids], flat_valid[ids], p_a[ids, other[ids]], self.swing[ids],
                 direction_a[ids], command[ids, :2].norm(dim=-1),
-                p_a[ids, self.swing[ids]],
+                p_a[ids, self.swing[ids]], offset_xy=offset,
             )
+            experiment.commit(ids, self.swing[ids], self.grid.reference, self.time, self.slot, self.anchor)
             self.stats["planning_attempts"][ids] += 1
             self.stats["targets_generated"][ids] += valid.float()
             for name, value in self.grid.diagnostics.items():
@@ -229,6 +246,7 @@ class VisualFootholdController:
         self.candidate_valid[candidate] = latch[candidate]
         self.candidate_slot[latch] = self.slot[:, None].expand(-1, 2)[latch]
         self.candidate_error[latch] = error[latch]
+        experiment.latch(latch, p_a, self.target, heading.transpose(-1, -2) @ r, self.time, self.anchor)
         event_ids = latch.any(-1).nonzero().flatten()
         if len(event_ids):
             _, seen, safe, _, _ = self.grid.build(flat_points[event_ids], flat_valid[event_ids])

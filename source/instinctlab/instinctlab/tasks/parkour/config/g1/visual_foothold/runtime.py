@@ -22,6 +22,11 @@ def save_visual_runtime(env_cfg, log_dir):
         "depth_delay_control_steps": 1,
         "step_dt": env_cfg.sim.dt * env_cfg.decimation,
         "settings": asdict(env_cfg.visual_foothold) if hasattr(env_cfg, "visual_foothold") else None,
+        "reference_experiment": asdict(env_cfg.visual_reference) if hasattr(env_cfg, "visual_reference") else None,
+        "touchdown_measurement": "first-contact URDF shoe FK in contact anchor frame; confirmed later",
+        "execution_error_definition": "first_contact_actual - final_projected_applied_reference",
+        "bias_frame": "gravity-levelled torso heading XY at first contact",
+        "bias_reset": "per environment, per episode; no cross-episode calibration",
         "scope": "Visual footprint estimate and commanded FK touchdown error; no pressure/slip certificate",
         "source_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                           for path in sorted(directory.glob("*.py"))},

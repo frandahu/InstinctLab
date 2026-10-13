@@ -6,9 +6,11 @@ playback, not the independent terrain-route success benchmark.
 
 import argparse
 import csv
+import hashlib
 import json
-from pathlib import Path
 import sys
+from dataclasses import asdict
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/instinct_rl"))
@@ -26,6 +28,13 @@ parser.add_argument("--max_steps", type=int, default=1500)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--output_dir", default="outputs/visual_foothold/play")
 parser.add_argument("--video", action="store_true")
+parser.add_argument("--experiment_mode", choices=("baseline", "perturb", "compensate"), default="baseline")
+parser.add_argument("--perturb_axis", choices=("x", "y"), default="x", help="Live contact-anchor axis")
+parser.add_argument("--perturb_cm", type=float, choices=(-4., -2., 2., 4.), default=2.)
+parser.add_argument("--ewma_alpha", type=float, default=0.2)
+parser.add_argument("--ewma_min_samples", type=int, default=3)
+parser.add_argument("--compensation_max_cm", type=float, default=4., help="Proposal norm bound before projection, 0..4 cm")
+parser.add_argument("--ewma_max_error_cm", type=float, default=50.)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if min(args.num_envs, args.max_steps) < 1:
@@ -46,7 +55,9 @@ def main():
     from eval_stairs import build_inference_policy, create_output_directory, sha256
     from training_yaml import load_training_yaml, restore_training_env_config
     from mp4_video import Mp4Recorder, first_render_frame
-    from diagnostics import summarize_totals
+    from diagnostics import controller_stat_delta, summarize_totals
+    from reference_diagnostics import ReferenceRecorder
+    from instinctlab.tasks.parkour.config.g1.visual_foothold.reference import ReferenceExperimentSettings
     from instinctlab.tasks.parkour.config.g1.visual_foothold.runtime import save_visual_runtime
 
     run = Path(args.load_run).expanduser().resolve(strict=True)
@@ -58,6 +69,15 @@ def main():
         raise ValueError("This playback requires a B visual foothold run")
     restore_training_env_config(cfg, saved)
     agent = load_training_yaml(run / "params/agent.yaml")
+    # Explicit experiment override AFTER restoration; old B checkpoints retain
+    # their actor dimensions, normalizer, action scaling and observation layout.
+    cfg.visual_reference = ReferenceExperimentSettings(
+        mode=args.experiment_mode, perturb_axis=args.perturb_axis, perturb_m=args.perturb_cm / 100,
+        ewma_alpha=args.ewma_alpha, min_samples=args.ewma_min_samples,
+        max_compensation_m=args.compensation_max_cm / 100, max_update_error_m=args.ewma_max_error_cm / 100,
+    )
+    cfg.visual_reference.validate()
+    print(f"[VISUAL REFERENCE] {asdict(cfg.visual_reference)}", flush=True)
     cfg.scene.num_envs, cfg.sim.device, cfg.seed = args.num_envs, args.device, args.seed
     cfg.scene.terrain.terrain_generator.seed = args.seed
     # Frozen actor needs no discriminator or reference dataset. Actor/critic
@@ -75,9 +95,27 @@ def main():
     env, recorder = None, None
     errors, valid_ticks, rows, resets = [], 0, 0, 0
     totals, termination_counts, term_integrals, durations = {}, {}, {}, []
+    reference_recorder = None
     result = {"status": "running", "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
               "seed": args.seed, "action_mode": "deterministic_mean",
               "scope": "Training-terrain playback; depth/FK diagnostics, not route success or stability certification"}
+    result["reference_experiment"] = asdict(cfg.visual_reference)
+    protocol = {
+        "saved_env_sha256": sha256(run / "params/env.yaml"),
+        "saved_agent_sha256": sha256(run / "params/agent.yaml"),
+        "checkpoint_sha256": result["checkpoint_sha256"],
+        "seed": args.seed, "num_envs": args.num_envs, "max_steps": args.max_steps,
+        "action_mode": "deterministic_mean", "device": args.device,
+        "source_sha256": {p.name: sha256(p) for p in sorted(
+            (ROOT / "source/instinctlab/instinctlab/tasks/parkour/config/g1/visual_foothold").glob("*.py"))},
+        "playback_source_sha256": {str(p.relative_to(ROOT)): sha256(p) for p in (
+            Path(__file__).resolve(), ROOT / "scripts/visual_foothold/reference_diagnostics.py",
+            ROOT / "scripts/visual_foothold/diagnostics.py", ROOT / "scripts/instinct_rl/eval_stairs.py",
+            ROOT / "scripts/instinct_rl/training_yaml.py",
+        )},
+    }
+    result["comparison_protocol"] = protocol
+    result["comparison_protocol_sha256"] = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()
     try:
         env = InstinctRlVecEnvWrapper(gym.make(task, cfg=cfg, render_mode="rgb_array" if args.video else None))
         base = env.unwrapped
@@ -101,7 +139,8 @@ def main():
         }
         term_names = [name for name, _ in base.reward_manager.get_active_iterable_terms(0)]
         episode = np.zeros(args.num_envs, dtype=int)
-        with (output / "visual_trace.csv").open("x", newline="", encoding="utf-8") as stream:
+        with ReferenceRecorder(output) as reference_recorder, \
+                (output / "visual_trace.csv").open("x", newline="", encoding="utf-8") as stream:
             fields = ["global_step", "env_id", "episode", "time_s", "swing_foot", "target_valid", "anchor_valid",
                       "target_x_b_m", "target_y_b_m", "target_z_b_m", "left_state", "right_state",
                       "commanded_touchdown", "touchdown_error_m", "done", "termination_reasons",
@@ -129,10 +168,9 @@ def main():
                     times = snapshot["time"].cpu().numpy()
                     contact = snapshot["contact_state"].cpu().numpy()
                     done = dones.cpu().numpy().astype(bool)
+                    reference_recorder.record(tick+1, episode, snapshot["reference_experiment"], done)
                     counts = snapshot["stats"].cpu().numpy()
-                    delta = counts - previous_stats
-                    if (delta < -1e-5).any():
-                        raise RuntimeError("Controller totals reset without a recorded episode boundary")
+                    delta = controller_stat_delta(counts, previous_stats, stat_names)
                     previous_stats = counts.copy()
                     previous_stats[done] = 0
                     for i, name in enumerate(stat_names):
@@ -192,7 +230,8 @@ def main():
                           termination_counts=termination_counts, weighted_reward_integrals=term_integrals,
                           completed_episode_lengths_s=durations,
                           completed_episode_length_mean_s=float(np.mean(durations)) if durations else None)
-            (output / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+            result["reference_metrics"] = reference_recorder.summary() if reference_recorder is not None else None
+            (output / "summary.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
             if env is not None:
                 env.close()
         print(f"[VISUAL] Playback artifacts: {output}", flush=True)

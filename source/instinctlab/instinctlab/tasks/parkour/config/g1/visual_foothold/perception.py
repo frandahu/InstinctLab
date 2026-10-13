@@ -126,7 +126,7 @@ class SupportGrid:
         return F.grid_sample(values.float().view(-1, 1, self.ny, self.nx), grid[:, None],
                              mode="nearest", align_corners=True).squeeze(1).squeeze(1)
 
-    def choose(self, points, valid, support, swing, direction, speed, swing_start):
+    def choose(self, points, valid, support, swing, direction, speed, swing_start, offset_xy=None):
         """Minimize cost over patches satisfying *all* geometry/coverage tests.
 
         Support defines reachability; the actual swing foot defines the corridor,
@@ -180,8 +180,27 @@ class SupportGrid:
         cost = cost.masked_fill(~feasible, float("inf"))
         best = cost.argmin(-1)
         rows = torch.arange(len(points), device=points.device)
-        target = torch.cat((xy[rows, best], h[rows, best, None]), -1)
+        planned = torch.cat((xy[rows, best], h[rows, best, None]), -1)
         target_valid = feasible.any(-1)
+        requested = planned.clone()
+        if offset_xy is not None:
+            if offset_xy.shape != (len(points), 2) or not torch.isfinite(offset_xy).all():
+                raise ValueError("Reference offset must be finite anchor-frame XY [batch,2]")
+            requested[:, :2] += offset_xy
+            # Project onto the SAME fully feasible candidates, including the
+            # original footprint, reach, yaw, height and observed corridor rules.
+            # Prefer the planned height; this is a finite-grid projection, not a
+            # continuous safety certificate. Ties keep the unmodified plan.
+            distance = (xy - requested[:, None, :2]).square().sum(-1)
+            distance += 0.6 * (h - planned[:, 2, None]).abs()
+            distance.masked_fill_(~feasible, float("inf"))
+            projected = distance.argmin(-1)
+            keep = distance[rows, best] <= distance[rows, projected] + 1e-8
+            projected = torch.where(keep, best, projected)
+            # Baseline must retain the original ranking, even on mixed heights.
+            best = torch.where(offset_xy.norm(dim=-1) > 1e-8, projected, best)
+        target = torch.cat((xy[rows, best], h[rows, best, None]), -1)
+        self.reference = {"planned": planned, "requested": requested, "applied": target, "valid": target_valid}
         # Check observed swing corridor; unseen space is not silently treated as clear.
         phase = torch.linspace(0, 1, 9, device=points.device)[None, :, None]
         path_xy = swing_start[:, None, :2] * (1-phase) + target[:, None, :2] * phase

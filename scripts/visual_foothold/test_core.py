@@ -46,11 +46,11 @@ def flat_cloud(n=1):
 class ControllerFixture:
     """Measured-state inputs shared by lifecycle regressions, without a simulator."""
 
-    def __init__(self, n):
+    def __init__(self, n, reference_settings=None):
         self.cloud = flat_cloud(n)
         self.cloud[..., 2] = -0.9
         cfg = perception.VisualFootholdSettings(joint_position_noise=0., joint_velocity_noise=0.)
-        self.core = controller.VisualFootholdController(n, self.cloud.shape[1], 0.02, cfg, "cpu")
+        self.core = controller.VisualFootholdController(n, self.cloud.shape[1], 0.02, cfg, "cpu", reference_settings)
         self.p = torch.tensor([[[0., 0.1, -0.9], [0., -0.1, -0.9]]]).expand(n, -1, -1).clone()
         self.rotation = torch.eye(3).expand(n, 2, 3, 3).clone()
         self.velocity = torch.zeros_like(self.p)
@@ -77,6 +77,16 @@ class ControllerFixture:
 
 
 class VisualFootholdContracts(unittest.TestCase):
+    def test_playback_deltas_accept_signed_errors_and_still_detect_unrecorded_resets(self):
+        import numpy as np
+        names = ("ticks", "signed_error_x_sum_m", "signed_error_y_sum_m", "commanded_touchdowns")
+        previous = np.array([[4., .02, -.01, 1.]])
+        current = np.array([[5., -.01, .03, 2.]])
+        delta = diagnostics.controller_stat_delta(current, previous, names)
+        np.testing.assert_allclose(delta, [[1., -.03, .04, 1.]])
+        with self.assertRaisesRegex(RuntimeError, "recorded episode boundary"):
+            diagnostics.controller_stat_delta(previous, current, names)
+
     def test_summary_distinguishes_no_events_from_perfect_touchdown(self):
         empty = diagnostics.summarize_totals({})
         self.assertIsNone(empty["touchdown_error_mean_m"]["value"])
@@ -323,6 +333,10 @@ class VisualFootholdContracts(unittest.TestCase):
         fixture.step(19)  # .40 s: phase changes and map is cleared.
         self.assertEqual(fixture.core.slot.item(), 1)
         self.assertEqual(fixture.core.stats["reward_payments"].item(), 1)
+        record = fixture.core.reference_experiment
+        self.assertEqual(record.candidate["slot"][0, 0].item(), 0)
+        self.assertAlmostEqual(record.candidate["error"][0, 0, 0].item(), .02, places=6)
+        self.assertEqual(record.samples.tolist(), [[1, 0]])
         self.assertFalse(fixture.core.landed.item())  # New command is unpaid.
         fixture.step(20)
         self.assertEqual(fixture.core.reward["touchdown"].item(), 0)

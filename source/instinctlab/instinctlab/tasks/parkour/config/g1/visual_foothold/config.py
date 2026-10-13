@@ -10,6 +10,7 @@ from ..agents.mixed_parkour_rl_cfg import G1MixedParkourPPORunnerCfg
 from . import mdp
 from .motions import grail_motion_reference
 from .perception import VisualFootholdSettings
+from .reference import ReferenceExperimentSettings
 
 
 @configclass
@@ -29,6 +30,7 @@ class VisualFootholdEnvCfg(VisualBaselineEnvCfg):
     """B: same joint control and AMP, with depth-derived foothold commands."""
 
     visual_foothold: VisualFootholdSettings = VisualFootholdSettings()
+    visual_reference: ReferenceExperimentSettings = ReferenceExperimentSettings()
 
     def __post_init__(self):
         super().__post_init__()

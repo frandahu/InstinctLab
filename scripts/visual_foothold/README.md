@@ -1,5 +1,8 @@
 # 深度落脚参考：作者数据 + GRAIL 的单策略训练
 
+冻结现有策略进行落脚误差、±2/±4 cm 参考扰动和 EWMA 补偿对照，见
+[误差感知先导实验与 Docker 命令](ERROR_AWARE_README.md)。该入口不重新训练策略。
+
 使用任务：`Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。
 一条训练命令只启动一个策略，不会自动启动 A/B 两组训练。
 `Baseline` 任务仅保留为以后可选的对照入口，现在不需要运行。

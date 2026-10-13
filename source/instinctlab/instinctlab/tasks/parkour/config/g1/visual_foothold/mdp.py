@@ -33,7 +33,10 @@ class VisualFootholdState:
             self.contact_ids.append(ids[0])
         self.camera_r = quaternion_rotation(torch.tensor(cfg.offset.rot, device=env.device))
         self.camera_p = torch.tensor(cfg.offset.pos, device=env.device)
-        self.core = VisualFootholdController(env.num_envs, 18*32, env.step_dt, self.settings, env.device)
+        self.core = VisualFootholdController(
+            env.num_envs, 18*32, env.step_dt, self.settings, env.device,
+            getattr(env.cfg, "visual_reference", None),
+        )
         self.dirty = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
         self.last_step = -1
 
@@ -93,7 +96,9 @@ def capture_before_reset(env):
             "stats_names": tuple(core.stats),
             "stats": torch.stack(tuple(core.stats.values()), -1).clone(),
             "command": env.command_manager.get_command("base_velocity").clone(),
+            "reference_experiment": core.reference_experiment.snapshot(),
         }
+        env.visual_snapshot["reference_experiment"]["pending"] = core.candidate_valid.clone()
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
