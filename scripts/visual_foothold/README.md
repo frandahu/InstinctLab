@@ -154,7 +154,8 @@ YAML 权重键必须为 `motion_weights`。训练日志会打印 `sources={'auth
 
 使用原有 `scripts/foot_state_demo/run_demo.py`，显式指定
 `--task Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。它沿用固定路线、起终点、速度指令和足端诊断，
-并保留 B 模型训练时的 actor 观测。下楼梯及混合路线命令见
+并保留 B 模型训练时的 actor 观测。主要验证使用 `--terrain_mode mixed`，每个机器人依次经过
+上下楼梯、上下斜坡和 5 个连续 curb 平台，记录各段落脚及踩边诊断。完整命令见
 [foot-state Demo](../foot_state_demo/README.md#visual-foothold-模型沿用同一个验证入口)。
 
 ## B 的训练地形诊断回放

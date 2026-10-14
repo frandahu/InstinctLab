@@ -51,7 +51,7 @@ MP4 沿用项目的 FFmpeg 编码器，文字面板使用 Pillow；缺少依赖�
 
 Visual Foothold 模型必须显式指定对应 `--task`，以保留模型训练时的观测维度和顺序；不能用默认 Mixed 任务加载。路线、起终点、速度指令、足端观测器和视频面板仍由本 Demo 生成，不恢复训练场景的随机围墙或随机站立。
 
-下楼梯沿用之前的 8 级、双机器人、seed 42 协议，只更换任务和 checkpoint：
+主要验证使用完整连续混合路线：**上楼梯 → 下楼梯 → 上坡 → 下坡 → 5 个连续 curb 平台 → 终点**。沿用原 Demo 每个方向 4 级楼梯、双机器人、seed 42 和近远交替间隙；每段都保留足端状态、落脚偏差与踩边诊断。
 
 ```bash
 RUN=/workspace/instinctlab/logs/instinct_rl/g1_parkour_visual_foothold/20261012_051419_visual_chain_fixed_fresh_device-cuda:0_resume-False
@@ -59,14 +59,18 @@ python -u scripts/foot_state_demo/run_demo.py \
   --task Instinct-Parkour-Visual-Foothold-Amp-G1-v0 \
   --load_run "$RUN" --checkpoint model_30000.pt \
   --device "$EVAL_DEVICE" --headless --seed 42 \
-  --terrain_mode stairs --stair_mode down --num_steps 8 \
+  --terrain_mode mixed --num_steps 4 \
+  --curb_count 5 --curb_layout alternating \
+  --curb_gaps 0.18 0.85 0.22 1.00 \
   --num_envs 2 --episodes_per_env 1 \
-  --episode_length_s 90 --max_steps 4500 \
+  --episode_length_s 120 --max_steps 6000 \
   --video --video_view lane --video_env_id 0 \
-  --output_dir outputs/foot_state_demo/model30000_downstairs_reference_seed42
+  --output_dir outputs/foot_state_demo/model30000_mixed_reference_seed42
 ```
 
-完整混合路线使用同一入口，将 `--terrain_mode stairs --stair_mode down` 换成 `--terrain_mode mixed`；较长路线同时使用原 Demo 的 `--episode_length_s 120 --max_steps 6000` 预算。`foot_summary.json` 记录实际任务和 actor 观测项；仍通过严格 checkpoint 权重加载检查维度兼容性。
+`mixed` 让每个机器人依次走完全部地形。不要同时加 `--stair_mode down`，它仅用于下楼梯专项。加 `--video_view overview` 可观看全部通道；`--num_steps 8` 可改成每个方向 8 级楼梯。
+
+下楼梯专项仍使用同一入口：将上述地形参数换成 `--terrain_mode stairs --stair_mode down --num_steps 8`，并使用单独的输出目录。`foot_summary.json` 记录实际任务和 actor 观测项；仍通过严格 checkpoint 权重加载检查维度兼容性。
 
 ## 输出
 
