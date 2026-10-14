@@ -2,13 +2,33 @@
 
 本实现是 [ERROR_AWARE_PLAN.md](ERROR_AWARE_PLAN.md) 的先导实验：在已有
 `Instinct-Parkour-Visual-Foothold-Amp-G1-v0` 上测量参考响应并验证历史误差反馈。
-继续加载同一个 B 策略及其 normalizer，保持原 41 维落脚观测、29 维关节动作和保存配置。
+继续加载同一个 B 策略及其 normalizer，保持原 41 维落脚观测、29 维关节动作；地形围墙覆盖单独记录。
 不训练策略，不实现 H-LIP、CLF、新高层 RL 或 InEKF。
 
 ## 实现与坐标
 
 `reference.py` 管理三个模式及事件账本，`perception.py` 执行原有可行候选集合内的投影，
 `play.py` 冻结策略回放，`analyze_reference.py` 离线比较 CSV。
+
+### 地形围墙修正（2026-10-14）
+
+原 Parkour 训练配方在每个 8×8 m 地块四边分别以 30% 概率生成高 5 m、厚 5 cm 的实体围墙。
+`visual_foothold` 继承了这一设置；旧运行的 `params/env.yaml` 也保存了这些墙。
+它们是地块围挡，不是楼梯、坡面或落脚候选，也不是调试可视化。普通 `PLAY` 配方虽然关墙，
+本回放入口却恢复训练配置，因此此前仍会生成墙。
+
+现在视觉落脚的 A/B 训练配置均单独复制地形并关闭随机围墙。原地形类型、比例、台阶/坡面/箱体尺寸、
+地块和全图边界设置保留，基础 Parkour/Mixed 配方不被修改。
+旧 checkpoint 回放在恢复保存配置**之后**应用 `--terrain_walls off`（默认）；
+需要原条件复现时显式使用 `--terrain_walls saved`。
+
+启动日志 `[VISUAL TERRAIN]` 显示恢复与生效设置；`eval_env.yaml`、`summary.json` 和 runtime JSON
+记录实际围墙状态。围墙模式进入比较协议，禁止把有墙与无墙回放合并成一次参考扰动/补偿对照。
+旧训练日志依然来自有墙分布，不能直接当作无墙评估结果。
+
+墙以外还有难度匹配问题：高台阶配置上限 45 cm，而首版落脚生成器允许的单步高差仅 24 cm；
+最大 70 cm 的缺口也可能超出 60 cm 的最大水平足距及足印约束。这些参数本次不作调整，
+应在无墙回放后独立检查可行参考覆盖，不能认为关墙就已完成地形可行性验证。
 
 | 模式 | 参考提案 |
 |---|---|
@@ -67,6 +87,7 @@ git rev-parse --short HEAD
 
 python scripts/visual_foothold/test_core.py -v
 python scripts/visual_foothold/test_reference.py -v
+python scripts/visual_foothold/test_terrain.py -v
 ```
 
 选择空闲 GPU；例如 `CUDA_VISIBLE_DEVICES=1` 后物理 GPU 1 映射为下面的逻辑 `cuda:0`。
@@ -86,6 +107,7 @@ OUT="outputs/visual_foothold/error_aware_$(date +%Y%m%d_%H%M%S)"
 python -u scripts/visual_foothold/play.py \
   --load_run "$RUN" --checkpoint "$CKPT" --headless --device cuda:0 \
   --num_envs 4 --max_steps 500 --seed 42 --experiment_mode baseline \
+  --terrain_walls off \
   --output_dir "$OUT/smoke"
 ```
 
@@ -93,7 +115,7 @@ python -u scripts/visual_foothold/play.py \
 
 ```bash
 COMMON=(--load_run "$RUN" --checkpoint "$CKPT" --headless --device cuda:0
-        --num_envs 4 --max_steps 10000 --seed 42)
+        --num_envs 4 --max_steps 10000 --seed 42 --terrain_walls off)
 
 python -u scripts/visual_foothold/play.py "${COMMON[@]}" \
   --experiment_mode baseline --output_dir "$OUT/baseline"

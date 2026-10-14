@@ -15,6 +15,8 @@ Added
 Fixed
 ^^^^^
 
+* Disabled random patch enclosures in visual foothold tasks and saved-config playback,
+  retaining explicit historical wall replay and wall-aware comparison metadata.
 * Filtered all visual foothold candidates by swing-corridor coverage before ranking,
   aligned the corridor with the actual swing foot, and preserved confirmed touchdown
   payments across map invalidation with sample-aware lifecycle diagnostics.

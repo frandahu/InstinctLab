@@ -1,7 +1,8 @@
 """Record the B actor with MP4 and pre-reset commanded-touchdown diagnostics.
 
-Uses saved training terrain/configuration. This is a training-distribution
-playback, not the independent terrain-route success benchmark.
+Uses saved training geometry with random patch walls disabled by default.
+--terrain_walls saved reproduces the saved wall settings. This is not the
+independent terrain-route success benchmark.
 """
 
 import argparse
@@ -31,6 +32,8 @@ parser.add_argument("--max_steps", type=int, default=1500)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--output_dir", default="outputs/visual_foothold/play")
 parser.add_argument("--video", action="store_true")
+parser.add_argument("--terrain_walls", choices=("off", "saved"), default="off",
+                    help="Disable random patch enclosures (default), or reproduce saved wall probabilities")
 parser.add_argument("--experiment_mode", choices=("baseline", "perturb", "compensate"), default="baseline")
 parser.add_argument("--perturb_axis", choices=("x", "y"), default="x", help="Live contact-anchor axis")
 parser.add_argument("--perturb_cm", type=float, choices=(-4., -2., 2., 4.), default=2.)
@@ -62,6 +65,7 @@ def main():
     from reference_diagnostics import ReferenceRecorder
     from instinctlab.tasks.parkour.config.g1.visual_foothold.reference import ReferenceExperimentSettings
     from instinctlab.tasks.parkour.config.g1.visual_foothold.runtime import save_visual_runtime
+    from instinctlab.tasks.parkour.config.g1.visual_foothold.terrain import configure_terrain_walls, terrain_wall_summary
 
     run = Path(args.load_run).expanduser().resolve(strict=True)
     checkpoint = (run / args.checkpoint).resolve(strict=True)
@@ -71,6 +75,10 @@ def main():
     if "visual_foothold" not in saved:
         raise ValueError("This playback requires a B visual foothold run")
     restore_training_env_config(cfg, saved)
+    # Old env.yaml restores wall_prob=0.3 AFTER the new task's wall-free defaults.
+    # Apply the explicit override here, while retaining a saved-config replay mode.
+    restored_terrain = terrain_wall_summary(cfg.scene.terrain.terrain_generator)
+    cfg.scene.terrain.terrain_generator = configure_terrain_walls(cfg.scene.terrain.terrain_generator, args.terrain_walls)
     agent = load_training_yaml(run / "params/agent.yaml")
     # Explicit experiment override AFTER restoration; old B checkpoints retain
     # their actor dimensions, normalizer, action scaling and observation layout.
@@ -83,6 +91,13 @@ def main():
     print(f"[VISUAL REFERENCE] {asdict(cfg.visual_reference)}", flush=True)
     cfg.scene.num_envs, cfg.sim.device, cfg.seed = args.num_envs, args.device, args.seed
     cfg.scene.terrain.terrain_generator.seed = args.seed
+    terrain_audit = {
+        "wall_mode": args.terrain_walls, "restored": restored_terrain,
+        "effective": terrain_wall_summary(cfg.scene.terrain.terrain_generator),
+    }
+    print(f"[VISUAL TERRAIN] walls={args.terrain_walls}; "
+          f"restored_enabled={restored_terrain['random_walls_enabled']}; "
+          f"effective_enabled={terrain_audit['effective']['random_walls_enabled']}", flush=True)
     # Frozen actor needs no discriminator or reference dataset. Actor/critic
     # observation terms and action scaling retain their saved dimensions.
     cfg.scene.motion_reference = None
@@ -102,14 +117,16 @@ def main():
     result = {"status": "running", "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
               "seed": args.seed, "action_mode": "deterministic_mean",
               "numpy_runtime": numpy_runtime,
-              "scope": "Training-terrain playback; depth/FK diagnostics, not route success or stability certification"}
+              "scope": "Saved-terrain playback with recorded wall override; depth/FK diagnostics, not route success"}
     result["reference_experiment"] = asdict(cfg.visual_reference)
+    result["terrain"] = terrain_audit
     protocol = {
         "saved_env_sha256": sha256(run / "params/env.yaml"),
         "saved_agent_sha256": sha256(run / "params/agent.yaml"),
         "checkpoint_sha256": result["checkpoint_sha256"],
         "seed": args.seed, "num_envs": args.num_envs, "max_steps": args.max_steps,
         "action_mode": "deterministic_mean", "device": args.device,
+        "terrain": terrain_audit,
         "source_sha256": {p.name: sha256(p) for p in sorted(
             (ROOT / "source/instinctlab/instinctlab/tasks/parkour/config/g1/visual_foothold").glob("*.py"))},
         "playback_source_sha256": {str(p.relative_to(ROOT)): sha256(p) for p in (

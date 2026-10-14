@@ -59,6 +59,7 @@ def compare_runs(directories):
     if None in protocols or len(protocols) != 1:
         raise ValueError("Compare only identical checkpoint/config/source/seed/env-count/step-budget protocols")
     results = [{"directory": path, "experiment": summary["reference_experiment"],
+                "terrain": summary.get("terrain"),
                 "reference_metrics": summarize_reference(plans, events),
                 "termination_counts": summary["termination_counts"],
                 "valid_target_fraction": summary["valid_target_fraction"]}

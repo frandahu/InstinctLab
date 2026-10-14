@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .terrain import terrain_wall_summary
+
 
 def save_visual_runtime(env_cfg, log_dir):
     directory = Path(__file__).resolve().parent
@@ -23,6 +25,7 @@ def save_visual_runtime(env_cfg, log_dir):
         "step_dt": env_cfg.sim.dt * env_cfg.decimation,
         "settings": asdict(env_cfg.visual_foothold) if hasattr(env_cfg, "visual_foothold") else None,
         "reference_experiment": asdict(env_cfg.visual_reference) if hasattr(env_cfg, "visual_reference") else None,
+        "terrain": terrain_wall_summary(env_cfg.scene.terrain.terrain_generator),
         "touchdown_measurement": "first-contact URDF shoe FK in contact anchor frame; confirmed later",
         "execution_error_definition": "first_contact_actual - final_projected_applied_reference",
         "bias_frame": "gravity-levelled torso heading XY at first contact",

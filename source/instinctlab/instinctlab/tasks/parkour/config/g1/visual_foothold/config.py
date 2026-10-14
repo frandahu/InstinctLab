@@ -1,7 +1,5 @@
 """Visual foothold training with author + GRAIL experts, and an optional baseline."""
 
-import copy
-
 from isaaclab.managers import ObservationTermCfg, RewardTermCfg, TerminationTermCfg
 from isaaclab.utils import configclass
 
@@ -11,6 +9,7 @@ from . import mdp
 from .motions import grail_motion_reference
 from .perception import VisualFootholdSettings
 from .reference import ReferenceExperimentSettings
+from .terrain import configure_terrain_walls
 
 
 @configclass
@@ -20,7 +19,9 @@ class VisualBaselineEnvCfg(G1MixedParkourEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.motion_reference = grail_motion_reference(self.scene.motion_reference)
-        self.scene.terrain.terrain_generator = copy.deepcopy(self.scene.terrain.terrain_generator)
+        # Random 5 m patch enclosures conflict with foothold traversal. Copy
+        # before changing them so the upstream/Mixed recipes are not mutated.
+        self.scene.terrain.terrain_generator = configure_terrain_walls(self.scene.terrain.terrain_generator)
         for group in (self.observations.policy, self.observations.critic):
             group.depth_image.params["delayed_frame_ranges"] = (1, 1)
 
