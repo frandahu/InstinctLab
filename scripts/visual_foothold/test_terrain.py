@@ -30,7 +30,7 @@ def original_generator():
 class TerrainWallContracts(unittest.TestCase):
     def test_wall_removal_is_isolated_and_preserves_complex_surfaces(self):
         original = original_generator()
-        fixed = terrain.configure_terrain_walls(original)
+        fixed = terrain.configure_terrain_walls(original, "off")
         self.assertFalse(terrain.terrain_wall_summary(fixed)["random_walls_enabled"])
         self.assertEqual(original.sub_terrains["stairs"].wall_prob, [.3]*4)
         self.assertEqual(original.sub_terrains["stairs"].perlin_cfg.wall_prob, [.1]*4)
@@ -48,7 +48,7 @@ class TerrainWallContracts(unittest.TestCase):
         # have already been overwritten by the historical 30% probabilities.
         restored = original_generator()
         off = terrain.configure_terrain_walls(restored, "off")
-        replay = terrain.configure_terrain_walls(restored, "saved")
+        replay = terrain.configure_terrain_walls(restored)
         self.assertFalse(terrain.terrain_wall_summary(off)["random_walls_enabled"])
         self.assertEqual(replay.sub_terrains["boxes"].wall_prob, [.3]*4)
         self.assertTrue(terrain.terrain_wall_summary(replay)["random_walls_enabled"])
@@ -64,7 +64,7 @@ class TerrainWallContracts(unittest.TestCase):
         report = terrain.terrain_wall_summary(restored)
         self.assertEqual(report["wall_enabled_configs"], ["stairs"])
         self.assertEqual(report["wall_configs"]["stairs"]["height_m"], 5.)
-        off = terrain.configure_terrain_walls(restored)
+        off = terrain.configure_terrain_walls(restored, "off")
         self.assertEqual(restored["sub_terrains"]["stairs"]["wall_prob"], [.3]*4)
         audit = {"restored": report, "effective": terrain.terrain_wall_summary(off)}
         encoded = json.loads(json.dumps(audit, allow_nan=False))

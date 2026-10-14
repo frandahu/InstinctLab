@@ -19,9 +19,10 @@ class VisualBaselineEnvCfg(G1MixedParkourEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.motion_reference = grail_motion_reference(self.scene.motion_reference)
-        # Random 5 m patch enclosures conflict with foothold traversal. Copy
-        # before changing them so the upstream/Mixed recipes are not mutated.
-        self.scene.terrain.terrain_generator = configure_terrain_walls(self.scene.terrain.terrain_generator)
+        # Preserve the original Parkour wall probabilities and isolate the copy.
+        self.scene.terrain.terrain_generator = configure_terrain_walls(
+            self.scene.terrain.terrain_generator, mode="saved",
+        )
         for group in (self.observations.policy, self.observations.critic):
             group.depth_image.params["delayed_frame_ranges"] = (1, 1)
 

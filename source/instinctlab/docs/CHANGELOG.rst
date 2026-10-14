@@ -7,7 +7,7 @@ Unreleased
 Added
 ^^^^^
 
-* Added frozen visual foothold reference perturbation and per-foot EWMA compensation,
+* Added online visual foothold training feedback, frozen reference perturbation and per-foot EWMA compensation,
   with signed first-contact error records, constrained projection diagnostics and CPU comparison tools.
 * Added an isolated G1 curb crossing curriculum and contact-based crossing rewards,
   GRAIL kinematic reference preparation, and policy warm-start with fresh AMP state.
@@ -15,8 +15,8 @@ Added
 Fixed
 ^^^^^
 
-* Disabled random patch enclosures in visual foothold tasks and saved-config playback,
-  retaining explicit historical wall replay and wall-aware comparison metadata.
+* Enabled EWMA feedback by default in visual foothold training/playback and retained
+  original terrain walls, with explicit baseline/wall-free controls and comparison metadata.
 * Filtered all visual foothold candidates by swing-corridor coverage before ranking,
   aligned the corridor with the actual swing foot, and preserved confirmed touchdown
   payments across map invalidation with sample-aware lifecycle diagnostics.

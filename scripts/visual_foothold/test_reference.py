@@ -17,15 +17,21 @@ reference = load("reference")
 
 class ReferenceContracts(unittest.TestCase):
     def test_modes_change_actor_reference_and_compensate_only_after_past_touchdown(self):
-        baseline = ControllerFixture(1)
+        baseline = ControllerFixture(1, reference.ReferenceExperimentSettings(mode="baseline"))
         perturbed = ControllerFixture(1, reference.ReferenceExperimentSettings(mode="perturb", perturb_m=-.04))
-        compensated = ControllerFixture(1, reference.ReferenceExperimentSettings(mode="compensate", min_samples=1))
+        # Use actual defaults: training feedback must activate after the first
+        # valid touchdown, rather than silently behaving as a baseline.
+        compensated = ControllerFixture(1)
+        self.assertEqual(compensated.core.reference_experiment.cfg.mode, "compensate")
+        self.assertEqual(compensated.core.reference_experiment.cfg.min_samples, 1)
         for fixture in (baseline, perturbed, compensated):
             fixture.begin_swing()
         torch.testing.assert_close(perturbed.core.observation[:, 22:25] - baseline.core.observation[:, 22:25],
                                    torch.tensor([[-.04, 0., 0.]]), atol=1e-6, rtol=0)
         torch.testing.assert_close(compensated.core.observation, baseline.core.observation)
-        compensated.candidate_contact(8)  # +2 cm first-contact error, before confirmation.
+        compensated.p[:, 0] = compensated.core.target + compensated.p[:, 1] + torch.tensor([.03, 0., 0.])
+        compensated.force[:, 0] = 100
+        compensated.step(8)  # +3 cm first-contact error, before confirmation.
         compensated.step(9)
         experiment = compensated.core.reference_experiment
         for tick in range(10, 41):
@@ -33,10 +39,10 @@ class ReferenceContracts(unittest.TestCase):
         self.assertEqual(experiment.plan["foot"].item(), 0)
         self.assertEqual(experiment.plan["bias_samples"].item(), 1)
         torch.testing.assert_close(experiment.plan["requested"][:, :2] - experiment.plan["planned"][:, :2],
-                                   torch.tensor([[-.02, 0.]]), atol=1e-6, rtol=0)
-        # The compensation really reaches the same projection as perturbations:
-        # a 2 cm proposal is erased on this flat 4 cm grid and reported as such.
-        self.assertTrue(experiment.plan["correction_erased"].item())
+                                   torch.tensor([[-.03, 0.]]), atol=1e-6, rtol=0)
+        torch.testing.assert_close(experiment.plan["applied"][:, :2] - experiment.plan["planned"][:, :2],
+                                   torch.tensor([[-.04, 0.]]), atol=1e-6, rtol=0)
+        self.assertFalse(experiment.plan["correction_erased"].item())
 
     def test_baseline_is_unchanged_and_small_perturbations_report_grid_erasure(self):
         # Independent flat geometry: 2 cm proposals tie the 4 cm lattice and

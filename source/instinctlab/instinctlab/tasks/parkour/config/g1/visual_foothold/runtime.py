@@ -37,4 +37,9 @@ def save_visual_runtime(env_cfg, log_dir):
     urdf = directory.parents[2] / "urdf/g1_29dof_torsoBase_popsicle_with_shoe.urdf"
     metadata["urdf_sha256"] = hashlib.sha256(urdf.read_bytes()).hexdigest()
     (output / "visual_foothold_runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    feedback = metadata["reference_experiment"]
+    if feedback is not None:
+        print(f"[VISUAL REFERENCE] mode={feedback['mode']}, alpha={feedback['ewma_alpha']}, "
+              f"min_samples={feedback['min_samples']}, max_compensation_m={feedback['max_compensation_m']}", flush=True)
+    print(f"[VISUAL TERRAIN] random_walls_enabled={metadata['terrain']['random_walls_enabled']}", flush=True)
     print(f"[VISUAL] Runtime assumptions/source hashes saved to {output}", flush=True)

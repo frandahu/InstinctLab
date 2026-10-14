@@ -17,8 +17,8 @@ def _wall_configs(generator):
             yield name + "/perlin_cfg", noise
 
 
-def configure_terrain_walls(generator, mode="off"):
-    """Copy a generator and disable patch walls, or retain its restored settings.
+def configure_terrain_walls(generator, mode="saved"):
+    """Copy a generator, preserving its walls unless explicitly disabled.
 
     Call AFTER saved-config restoration for playback. Changing only the fresh
     task defaults cannot override wall probabilities in an old env.yaml. The

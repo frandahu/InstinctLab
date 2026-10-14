@@ -1,26 +1,27 @@
-# 冻结策略的落脚误差与自适应补偿验证
+# 误差反馈训练与冻结策略对照验证
 
 本实现是 [ERROR_AWARE_PLAN.md](ERROR_AWARE_PLAN.md) 的先导实验：在已有
-`Instinct-Parkour-Visual-Foothold-Amp-G1-v0` 上测量参考响应并验证历史误差反馈。
-继续加载同一个 B 策略及其 normalizer，保持原 41 维落脚观测、29 维关节动作；地形围墙覆盖单独记录。
-不训练策略，不实现 H-LIP、CLF、新高层 RL 或 InEKF。
+`Instinct-Parkour-Visual-Foothold-Amp-G1-v0` 上通过历史有效触地误差修正后续落脚参考。
+主训练任务默认启用 EWMA 补偿，保留原 Parkour 围墙；原 41 维落脚观测、29 维关节动作不变。
+`train.py` 更新策略；`play.py` 冻结策略，只运行在线误差估计与补偿。
+不实现 H-LIP、CLF、新高层 RL 或 InEKF。
 
 ## 实现与坐标
 
 `reference.py` 管理三个模式及事件账本，`perception.py` 执行原有可行候选集合内的投影，
 `play.py` 冻结策略回放，`analyze_reference.py` 离线比较 CSV。
 
-### 地形围墙修正（2026-10-14）
+### 默认训练与围墙设置（2026-10-14）
 
 原 Parkour 训练配方在每个 8×8 m 地块四边分别以 30% 概率生成高 5 m、厚 5 cm 的实体围墙。
 `visual_foothold` 继承了这一设置；旧运行的 `params/env.yaml` 也保存了这些墙。
 它们是地块围挡，不是楼梯、坡面或落脚候选，也不是调试可视化。普通 `PLAY` 配方虽然关墙，
 本回放入口却恢复训练配置，因此此前仍会生成墙。
 
-现在视觉落脚的 A/B 训练配置均单独复制地形并关闭随机围墙。原地形类型、比例、台阶/坡面/箱体尺寸、
-地块和全图边界设置保留，基础 Parkour/Mixed 配方不被修改。
-旧 checkpoint 回放在恢复保存配置**之后**应用 `--terrain_walls off`（默认）；
-需要原条件复现时显式使用 `--terrain_walls saved`。
+按明确的实验要求，视觉落脚的 A/B 训练配置单独复制地形并保留原围墙概率；
+此前默认去墙的改动已撤回。原地形类型、比例、台阶/坡面/箱体尺寸、地块与全图边界均保留。
+回放默认 `--terrain_walls saved`，遵循 checkpoint 保存的围墙设置。
+只有显式指定 `--terrain_walls off` 才进行无墙对照；它不会修改训练地形。
 
 启动日志 `[VISUAL TERRAIN]` 显示恢复与生效设置；`eval_env.yaml`、`summary.json` 和 runtime JSON
 记录实际围墙状态。围墙模式进入比较协议，禁止把有墙与无墙回放合并成一次参考扰动/补偿对照。
@@ -28,13 +29,13 @@
 
 墙以外还有难度匹配问题：高台阶配置上限 45 cm，而首版落脚生成器允许的单步高差仅 24 cm；
 最大 70 cm 的缺口也可能超出 60 cm 的最大水平足距及足印约束。这些参数本次不作调整，
-应在无墙回放后独立检查可行参考覆盖，不能认为关墙就已完成地形可行性验证。
+应独立检查这些地形上的可行参考覆盖。
 
 | 模式 | 参考提案 |
 |---|---|
-| `baseline`，默认 | 原规划落点，完全保留原候选排序 |
+| `baseline`，显式对照 | 原规划落点，完全保留原候选排序 |
 | `perturb` | 在原规划点上沿当前接触锚点 X 或 Y 加固定 ±2/±4 cm |
-| `compensate` | 原规划点减去该环境、该脚的历史预测偏差，补偿提案向量范数最多 4 cm |
+| `compensate`，训练与回放默认 | 原规划点减去该环境、该脚的历史预测偏差，补偿提案向量范数最多 4 cm |
 
 规划点 `planned`、修正提案 `requested`、投影后的最终落点 `applied` 分别记录。
 策略的目标、目标误差及摆脚插值参考都使用 `applied`。投影保留足印覆盖、平面残差、坡度、
@@ -66,8 +67,36 @@ requested_xy = planned_xy - bounded(predicted_bias_in_current_anchor_xy)
 EWMA 使用重力对齐的躯干朝向 XY，以免换支撑脚后混用锚点轴。
 规划时将预测偏差旋转到当前锚点轴，再投影。左右脚、各环境独立；每次 episode reset 清空历史。
 只用已确认、有限且水平误差不超过 `--ewma_max_error_cm`（默认 50 cm）的标签更新。
-默认每脚至少 3 条样本才补偿；参考生成在接触确认之后，因此同帧新提交的命令也可使用刚确认的历史误差。
+默认每脚从首条有效样本开始补偿；参考生成在接触确认之后，因此同帧新提交的命令也可使用刚确认的历史误差。
 未触地样本、取消样本和无可行参考均保留计数；没有误差样本时 JSON 为 `null`。
+
+## 从零开始误差反馈训练
+
+在远程原有 Docker 容器内更新本分支后执行。下面保持作者/GRAIL 为 25%/75%，
+显式启用 EWMA，随机初始化 PPO/AMP 策略，保留原围墙：
+
+```bash
+cd /workspace/instinctlab
+git switch feat/visual-foothold-error-feedback
+git pull --ff-only origin feat/visual-foothold-error-feedback
+
+nvidia-smi
+export CUDA_VISIBLE_DEVICES=1  # 换成实际空闲的物理 GPU 编号
+python -u scripts/instinct_rl/train.py \
+  --task Instinct-Parkour-Visual-Foothold-Amp-G1-v0 \
+  --headless --device cuda:0 --num_envs 2048 --max_iterations 30000 \
+  --seed 42 --amp_grail_fraction 0.75 \
+  --run_name visual_ewma_walls_fresh_20261014 \
+  agent.device=cuda:0 agent.resume=False \
+  env.visual_reference.mode=compensate \
+  env.visual_reference.ewma_alpha=0.2 \
+  env.visual_reference.min_samples=1 \
+  env.visual_reference.max_compensation_m=0.04
+```
+
+启动应显示 `[VISUAL REFERENCE] mode=compensate`、`min_samples=1` 和
+`[VISUAL TERRAIN] random_walls_enabled=True`。保存配置与 runtime JSON 同时记录这些实际值。
+反馈链为：有效触地误差 → 每脚 EWMA → 下一参考修正与安全投影 → 策略观测及跟踪奖励 → PPO 更新。
 
 ## 远程 Docker 验证命令
 
@@ -106,8 +135,8 @@ OUT="outputs/visual_foothold/error_aware_$(date +%Y%m%d_%H%M%S)"
 # 首先只验证 4 环境、500 步启动和记录；不训练、不保存新 checkpoint。
 python -u scripts/visual_foothold/play.py \
   --load_run "$RUN" --checkpoint "$CKPT" --headless --device cuda:0 \
-  --num_envs 4 --max_steps 500 --seed 42 --experiment_mode baseline \
-  --terrain_walls off \
+  --num_envs 4 --max_steps 500 --seed 42 --experiment_mode compensate \
+  --terrain_walls saved \
   --output_dir "$OUT/smoke"
 ```
 
@@ -115,7 +144,7 @@ python -u scripts/visual_foothold/play.py \
 
 ```bash
 COMMON=(--load_run "$RUN" --checkpoint "$CKPT" --headless --device cuda:0
-        --num_envs 4 --max_steps 10000 --seed 42 --terrain_walls off)
+        --num_envs 4 --max_steps 10000 --seed 42 --terrain_walls saved)
 
 python -u scripts/visual_foothold/play.py "${COMMON[@]}" \
   --experiment_mode baseline --output_dir "$OUT/baseline"
@@ -128,8 +157,7 @@ for AXIS in x y; do
   done
 done
 
-# 先导实验从每脚首条有效标签起补偿，便于稀疏触地场景检查闭环是否激活。
-# 改成 3 可观察默认 warmup 的影响；1 条样本的偏差预测可能很噪。
+# 默认从每脚首条有效标签起补偿；改成 3 可单独对照 warmup 的影响。
 python -u scripts/visual_foothold/play.py "${COMMON[@]}" \
   --experiment_mode compensate --ewma_alpha 0.2 --ewma_min_samples 1 \
   --compensation_max_cm 4 --ewma_max_error_cm 50 \

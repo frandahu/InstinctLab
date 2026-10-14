@@ -15,13 +15,13 @@ from .kinematics import rotate
 
 @dataclass
 class ReferenceExperimentSettings:
-    """Frozen-policy experiments; lengths are metres, alpha is per touchdown."""
+    """Online training feedback and playback; lengths in metres, alpha per touchdown."""
 
-    mode: str = "baseline"
+    mode: str = "compensate"
     perturb_axis: str = "x"
     perturb_m: float = 0.02
     ewma_alpha: float = 0.2
-    min_samples: int = 3
+    min_samples: int = 1
     max_compensation_m: float = 0.04
     max_update_error_m: float = 0.50
     erased_tolerance_m: float = 0.001

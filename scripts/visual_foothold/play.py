@@ -1,7 +1,7 @@
 """Record the B actor with MP4 and pre-reset commanded-touchdown diagnostics.
 
-Uses saved training geometry with random patch walls disabled by default.
---terrain_walls saved reproduces the saved wall settings. This is not the
+Uses saved training geometry and wall settings, with EWMA feedback enabled.
+--terrain_walls off is an explicit wall-free control. This is not the
 independent terrain-route success benchmark.
 """
 
@@ -32,13 +32,13 @@ parser.add_argument("--max_steps", type=int, default=1500)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--output_dir", default="outputs/visual_foothold/play")
 parser.add_argument("--video", action="store_true")
-parser.add_argument("--terrain_walls", choices=("off", "saved"), default="off",
-                    help="Disable random patch enclosures (default), or reproduce saved wall probabilities")
-parser.add_argument("--experiment_mode", choices=("baseline", "perturb", "compensate"), default="baseline")
+parser.add_argument("--terrain_walls", choices=("off", "saved"), default="saved",
+                    help="Retain saved walls (default), or explicitly disable patch enclosures")
+parser.add_argument("--experiment_mode", choices=("baseline", "perturb", "compensate"), default="compensate")
 parser.add_argument("--perturb_axis", choices=("x", "y"), default="x", help="Live contact-anchor axis")
 parser.add_argument("--perturb_cm", type=float, choices=(-4., -2., 2., 4.), default=2.)
 parser.add_argument("--ewma_alpha", type=float, default=0.2)
-parser.add_argument("--ewma_min_samples", type=int, default=3)
+parser.add_argument("--ewma_min_samples", type=int, default=1)
 parser.add_argument("--compensation_max_cm", type=float, default=4., help="Proposal norm bound before projection, 0..4 cm")
 parser.add_argument("--ewma_max_error_cm", type=float, default=50.)
 AppLauncher.add_app_launcher_args(parser)
@@ -75,8 +75,8 @@ def main():
     if "visual_foothold" not in saved:
         raise ValueError("This playback requires a B visual foothold run")
     restore_training_env_config(cfg, saved)
-    # Old env.yaml restores wall_prob=0.3 AFTER the new task's wall-free defaults.
-    # Apply the explicit override here, while retaining a saved-config replay mode.
+    # Preserve restored wall settings by default. A wall-free control must be
+    # explicitly requested and applied AFTER saved-config restoration.
     restored_terrain = terrain_wall_summary(cfg.scene.terrain.terrain_generator)
     cfg.scene.terrain.terrain_generator = configure_terrain_walls(cfg.scene.terrain.terrain_generator, args.terrain_walls)
     agent = load_training_yaml(run / "params/agent.yaml")

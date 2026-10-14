@@ -3,8 +3,9 @@
 冻结现有策略进行落脚误差、±2/±4 cm 参考扰动和 EWMA 补偿对照，见
 [误差感知先导实验与 Docker 命令](ERROR_AWARE_README.md)。该入口不重新训练策略。
 
-视觉落脚任务现默认关闭原 Parkour 的随机 5 m 地块围墙，保留复杂地形表面。
-`play.py` 在恢复旧训练配置后也默认关墙；按历史有墙条件复现需加 `--terrain_walls saved`。
+视觉落脚主训练任务默认启用 EWMA 误差反馈，并保留原 Parkour 的随机地块围墙。
+`play.py` 默认启用补偿并保留保存的围墙设置；`--experiment_mode baseline` 和 `--terrain_walls off`
+分别是显式无补偿/无墙对照。完整从零训练命令见上述说明。
 
 使用任务：`Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。
 一条训练命令只启动一个策略，不会自动启动 A/B 两组训练。
