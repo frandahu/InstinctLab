@@ -14,8 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/instinct_rl"))
+from render_bootstrap import preload_isaac_numpy
 from cudnn_bootstrap import preload_torch_cudnn
 
+# Select the RGB-compatible ABI before AppLauncher or PyTorch imports NumPy.
+numpy_runtime = preload_isaac_numpy()
 preload_torch_cudnn()
 
 from isaaclab.app import AppLauncher
@@ -98,6 +101,7 @@ def main():
     reference_recorder = None
     result = {"status": "running", "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint),
               "seed": args.seed, "action_mode": "deterministic_mean",
+              "numpy_runtime": numpy_runtime,
               "scope": "Training-terrain playback; depth/FK diagnostics, not route success or stability certification"}
     result["reference_experiment"] = asdict(cfg.visual_reference)
     protocol = {
