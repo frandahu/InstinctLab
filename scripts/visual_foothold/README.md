@@ -147,9 +147,17 @@ YAML 权重键必须为 `motion_weights`。训练日志会打印 `sources={'auth
 该任务也使用相同的联合专家池，但没有新增足端参考观测和奖励；不会随主任务自动启动。
 届时应保持相同数据、种子和训练预算，并在相同固定几何上比较。
 
-## B 的确定性播放、MP4 和 CSV
+## B 的复杂地形行走验证
 
-下面使用训练地形恢复保存配置，直接加载冻结 actor，不启动 AMP 判别器或优化器。
+使用原有 `scripts/foot_state_demo/run_demo.py`，显式指定
+`--task Instinct-Parkour-Visual-Foothold-Amp-G1-v0`。它沿用固定路线、起终点、速度指令和足端诊断，
+并保留 B 模型训练时的 actor 观测。下楼梯及混合路线命令见
+[foot-state Demo](../foot_state_demo/README.md#visual-foothold-模型沿用同一个验证入口)。
+
+## B 的训练地形诊断回放
+
+以下 `play.py` 仅用于训练分布及参考干预诊断，会保留保存配置中的随机围墙和指令。
+行走验证使用上一节的 foot-state Demo。下面恢复训练配置，直接加载冻结 actor，不启动 AMP 判别器或优化器。
 替换 `RUN` 为实际 B 运行目录，checkpoint 必须存在。它不是原 terrain_eval 独立路线成功率测试。
 
 ```bash

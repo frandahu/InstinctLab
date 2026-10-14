@@ -1,10 +1,10 @@
 # G1 足端状态独立 Demo
 
-所有新实现都在本目录。现有训练入口、任务文件、奖励、策略输入和已有评估器源码均不修改；不加载优化器或 AMP 数据集，不训练新模型。
+足端状态与参考诊断实现在本目录。复用已有评估器的路线和冻结策略加载，为其任务及观测检查增加显式可选扩展；原任务的默认检查保持不变。不加载优化器或 AMP 数据集，不训练新模型。
 
 V2 实现**足端状态、冻结落脚参考、触地偏差与踩边几何诊断**。参考在摆动开始时生成，采用固定的通道／世界坐标，不随之后的支撑脚移动而改变。
 
-当前 Mixed actor 仍只接收原有观测和速度命令，**不会接收或执行这些落脚参考**。这里的误差是实际落脚相对几何建议的偏差，不能报告为已下发指令的跟踪误差。下一阶段的参考条件控制／训练需单独接入。
+Mixed actor 仍只接收原有观测和速度命令；Visual Foothold actor 保留训练时的深度落脚观测。两者都**不会接收本 Demo 生成的几何落脚参考**。这里的误差是实际落脚相对几何建议的偏差，不能报告为已下发指令的跟踪误差。
 
 ## 文件
 
@@ -46,6 +46,27 @@ python -u scripts/foot_state_demo/run_demo.py \
 - hard 混合路线更长，可设 `--max_steps 9000 --episode_length_s 180`。这些均是冻结策略评估命令。
 
 MP4 沿用项目的 FFmpeg 编码器，文字面板使用 Pillow；缺少依赖会明确报错，不自动安装或升级依赖。需要时在原仿真环境安装 `imageio[ffmpeg]` 与 `Pillow`。
+
+## Visual Foothold 模型：沿用同一个验证入口
+
+Visual Foothold 模型必须显式指定对应 `--task`，以保留模型训练时的观测维度和顺序；不能用默认 Mixed 任务加载。路线、起终点、速度指令、足端观测器和视频面板仍由本 Demo 生成，不恢复训练场景的随机围墙或随机站立。
+
+下楼梯沿用之前的 8 级、双机器人、seed 42 协议，只更换任务和 checkpoint：
+
+```bash
+RUN=/workspace/instinctlab/logs/instinct_rl/g1_parkour_visual_foothold/20261012_051419_visual_chain_fixed_fresh_device-cuda:0_resume-False
+python -u scripts/foot_state_demo/run_demo.py \
+  --task Instinct-Parkour-Visual-Foothold-Amp-G1-v0 \
+  --load_run "$RUN" --checkpoint model_30000.pt \
+  --device "$EVAL_DEVICE" --headless --seed 42 \
+  --terrain_mode stairs --stair_mode down --num_steps 8 \
+  --num_envs 2 --episodes_per_env 1 \
+  --episode_length_s 90 --max_steps 4500 \
+  --video --video_view lane --video_env_id 0 \
+  --output_dir outputs/foot_state_demo/model30000_downstairs_reference_seed42
+```
+
+完整混合路线使用同一入口，将 `--terrain_mode stairs --stair_mode down` 换成 `--terrain_mode mixed`；较长路线同时使用原 Demo 的 `--episode_length_s 120 --max_steps 6000` 预算。`foot_summary.json` 记录实际任务和 actor 观测项；仍通过严格 checkpoint 权重加载检查维度兼容性。
 
 ## 输出
 

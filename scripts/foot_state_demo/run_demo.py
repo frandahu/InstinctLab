@@ -18,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "instinct_rl"))
 evaluation = importlib.import_module("eval_stairs")
+VISUAL_TASK = "Instinct-Parkour-Visual-Foothold-Amp-G1-v0"
 
 
 def parse_args():
@@ -77,7 +78,7 @@ def parse_args():
             "task": "Instinct-Parkour-Mixed-Amp-G1-v0", "terrain_mode": "mixed",
             "num_envs": 2, "num_steps": 4, "episodes_per_env": 1,
             "episode_length_s": 120.0, "max_steps": 6000,
-        })
+        }, additional_tasks=(VISUAL_TASK,))
     finally:
         sys.argv = original
     if args.trace_stride != 1:
@@ -125,8 +126,15 @@ def run_simulation(args, foot, cases, output, diagnostics, simulation_app):
         agent = agent_cfg.to_dict()
     else:
         diagnostics.phase("restore_saved_training_config")
+        saved_env = evaluation.load_training_yaml(env_path)
+        if ("visual_foothold" in saved_env) != (args.task == VISUAL_TASK):
+            raise ValueError(
+                "Selected task does not match the saved actor observation schema. "
+                f"Use --task {VISUAL_TASK} for a Visual Foothold checkpoint; "
+                "keep the original task for a Mixed checkpoint."
+            )
         restoration = evaluation.restore_training_env_config(
-            cfg, evaluation.load_training_yaml(env_path), skip_paths=("/scene/terrain/terrain_generator",),
+            cfg, saved_env, skip_paths=("/scene/terrain/terrain_generator",),
         )
         agent = evaluation.load_training_yaml(agent_path)
     cfg = configure_stair_evaluation(
@@ -180,7 +188,8 @@ def run_simulation(args, foot, cases, output, diagnostics, simulation_app):
         env = gym.make(args.task, cfg=cfg, render_mode="rgb_array" if args.video else None)
         env = InstinctRlVecEnvWrapper(env)
         base = env.unwrapped
-        evaluation.validate_policy_observations(base)
+        additional_terms = ("visual_foothold",) if args.task == VISUAL_TASK else ()
+        evaluation.validate_policy_observations(base, additional_terms=additional_terms)
         kinematics = LegKinematics(urdf, list(base.scene["robot"].joint_names), sole_offset=foot.sole_offset)
         if kinematics.root_link != "torso_link":
             raise ValueError("Demo truth comparison requires the actual torso-root URDF")
@@ -193,6 +202,7 @@ def run_simulation(args, foot, cases, output, diagnostics, simulation_app):
         diagnostics.phase("load_frozen_actor", str(checkpoint))
         policy, iteration = evaluation.build_inference_policy(env, agent, checkpoint, args.device, sample=args.sample)
         report.update({"checkpoint": str(checkpoint), "iteration": int(iteration),
+                       "task": args.task, "policy_observation_terms": list(base.observation_manager.active_terms["policy"]),
                        "root_link": kinematics.root_link, "required_joint_names": kinematics.required_joint_names})
         observation, _ = env.get_observations()
         sampler = base.termination_manager.get_term_cfg("stair_success").func
@@ -303,7 +313,7 @@ def main():
         "protocol": "foot_state_demo_v2", "cases": cases, "foot_options": vars(foot),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "scope": ("Passive foot state, privileged frozen-world foothold targets and edge diagnostics. "
-                  "The actor receives no foothold targets and no training reward is changed."),
+                  "Diagnostic foothold targets are not injected into the actor; saved policy inputs are retained."),
     })
     print(f"[INFO] Independent demo output: {output}", flush=True)
     if args.dry_run:

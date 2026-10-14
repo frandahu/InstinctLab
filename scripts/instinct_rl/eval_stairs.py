@@ -92,7 +92,8 @@ def build_parser(defaults=None):
     return parser
 
 
-def parse_args(defaults=None):
+def parse_args(defaults=None, *, additional_tasks=()):
+    """Parse the route protocol, with extra actor tasks explicitly enabled by callers."""
     parser = build_parser(defaults)
     apply_difficulty_defaults(parser)
     numpy_runtime = None
@@ -125,8 +126,8 @@ def parse_args(defaults=None):
         "Instinct-Parkour-Target-Amp-G1-v0", "Instinct-Parkour-Stairs-Amp-G1-v1",
         "Instinct-Parkour-Mixed-Amp-G1-v0",
         "Instinct-Parkour-Curb-Crossing-Amp-G1-v0",
-    ):
-        parser.error("This evaluator supports the G1 Parkour v0, Stairs v1, Mixed v0, and Curb Crossing v0 tasks")
+    ) + tuple(additional_tasks):
+        parser.error("Unsupported evaluation task: " + args.task)
     for name in ("episodes_per_env", "trace_stride", "video_stride"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name} must be positive")
@@ -257,12 +258,12 @@ def build_inference_policy(env, agent_cfg, checkpoint, device, sample=False):
     return actor, iteration
 
 
-def validate_policy_observations(base):
-    """Keep the checkpoint's actor inputs ordered and free of critic-only velocity."""
+def validate_policy_observations(base, *, additional_terms=()):
+    """Check ordered actor inputs, including explicitly enabled trailing terms."""
     expected = (
         "base_ang_vel", "projected_gravity", "velocity_commands",
         "joint_pos", "joint_vel", "actions", "depth_image",
-    )
+    ) + tuple(additional_terms)
     actual = tuple(base.observation_manager.active_terms["policy"])
     if actual != expected:
         raise RuntimeError(f"Unsupported policy observation terms: {list(actual)}; expected {list(expected)}")
